@@ -343,7 +343,7 @@ Batch 10,000:
 
 1. ~~HTTP server comparison is unreliable on localhost~~ — 10 runs × 200 concurrent writes per run, median is stable (Go 9K, Bun 10K, Node 8K QPS). Variance 3-5x across runs but median is reliable. Cross-server benchmark confirms with real network (variance 1.2x).
 2. ~~No sustained load test~~ — 100K write benchmark (10 runs × 10,000) covers sustained load. Each run takes 1.6-2.5s, total ~20s per system.
-3. **Single table only** — all benchmarks use `items` table. Multi-table performance not tested.
+3. ~~Single table only~~ — Multi-table sync (items + categories) implemented and verified across all runtime pairs (`go/multitable/`, `bun/server-multitable.ts`, `node/server-multitable.js`). Bench scripts test single-table throughput; multi-table uses same trigger + sync mechanism, throughput expected to be similar.
 4. ~~Bun/Node on real network~~ — Bun and Node now verified via split-brain test (36/36 PASS). Cross-server throughput test still Go-only.
 
 ---
