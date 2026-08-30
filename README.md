@@ -142,6 +142,34 @@ hook-sync is **2.1x faster** than walsync and **5.6x faster** than cr-sqlite on 
 
 hook-sync sync delay p50 = 100ms (batch interval). Tunable: reduce batch interval to 50ms → ~50ms sync delay.
 
+### Batch Interval Optimization
+
+Sync delay is directly controlled by the `-batch-ms` flag. Benchmarked across 6 intervals (localhost, 2 nodes):
+
+| Interval | Sync p50 | Sync p95 | Write QPS | Burst sync (100 writes) |
+|----------|---------:|---------:|----------:|------------------------:|
+| **10ms** | **11.79ms** | **12.81ms** | **7648** | 20.55ms |
+| 25ms | 23.73ms | 30.27ms | 4911 | 23.78ms |
+| 50ms | 52.14ms | 53.89ms | 5746 | 24.61ms |
+| 100ms (default) | 99.69ms | 104.48ms | 5242 | 22.01ms |
+| 200ms | 200.06ms | 204.44ms | 5012 | 18.70ms |
+| 500ms | 499.82ms | 504.51ms | 6808 | 22.45ms |
+
+**Findings:**
+
+- Sync delay ≈ interval + 1-2ms overhead (linear, predictable)
+- Burst sync (100 concurrent writes) is constant ~20-25ms regardless of interval — batch threshold (100 changes) triggers immediate ship, bypassing the ticker
+- Write throughput (5-7.6K QPS) shows no significant correlation with interval — differences are noise
+- Ticker fires no-op on empty batch (`if len(batch) > 0` guard) — no empty HTTP requests
+
+**Recommendation:**
+
+- **Local/LAN (0-5ms RTT):** `10ms` — lowest sync delay, no overhead penalty
+- **Remote/WAN (35-40ms RTT):** `50ms` — sync delay ~50ms + RTT, avoids batch pileup from network latency
+- **Default `100ms`:** safe for mixed environments, still 47x faster than walsync
+
+The batch threshold (100 changes) provides a safety valve: burst writes always ship immediately regardless of interval.
+
 ### Direct Go Benchmark (pure SQLite, no HTTP overhead)
 
 | Mode | Writes | QPS | Hooks fired |
