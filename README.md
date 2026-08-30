@@ -105,12 +105,10 @@ hook-sync/
 ├── bench-fullmesh.sh         # Full mesh benchmark, 4 nodes all-to-all (all 3 runtimes)
 ├── bench-hub.sh              # Dedicated hub benchmark, 1 hub + 3 edges (all 3 runtimes)
 ├── bench-splitbrain.sh       # Split-brain safety test (partition, conflict, reconnect)
+├── bench-all.sh             # Run ALL benchmarks in one command (all topologies, all runtimes)
 ├── hook-sync-go              # Go binary (point-to-point, single-table)
 ├── hook-sync-mesh-go         # Go binary (full mesh, multi-peer)
 ├── hook-sync-hub             # Go binary (dedicated hub, Pebble KV)
-├── bench-hsync.js            # HTTP benchmark client
-├── bench-interval.js         # Batch interval optimization
-├── bench-trigger-overhead.ts # Trigger overhead measurement
 └── BENCHMARK-REPORT.md       # Full benchmark report
 ```
 
