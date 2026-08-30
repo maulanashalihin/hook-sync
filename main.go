@@ -197,7 +197,7 @@ func (n *Node) captureChange(d sqlite3.SQLitePreUpdateData) {
 	}
 }
 
-// batchShip collects changes and ships every 100ms
+// batchShip collects changes and ships every batchInterval (default 50ms)
 func (n *Node) batchShip() {
 	batch := make([]Change, 0, 100)
 	ticker := time.NewTicker(n.batchInterval)
