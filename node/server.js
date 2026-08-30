@@ -86,7 +86,9 @@ db.exec(`
 	CREATE TRIGGER IF NOT EXISTS items_ad AFTER DELETE ON items
 	WHEN (SELECT value FROM _meta WHERE key = 'syncing') = 0
 	BEGIN
-		INSERT INTO _changes(op, row_id, row_data) VALUES('DELETE', OLD.id, NULL);
+		INSERT INTO _changes(op, row_id, row_data) VALUES('DELETE', OLD.id,
+			json_object('id', OLD.id, 'name', OLD.name, 'value', OLD.value,
+				'created_at', OLD.created_at, 'updated_at', OLD.updated_at, 'node_id', OLD.node_id));
 	END;
 `);
 
@@ -95,6 +97,7 @@ const stmtInsert = db.prepare("INSERT INTO items(id, name, value, created_at, up
 const stmtUpdate = db.prepare("UPDATE items SET name = ?, value = ?, updated_at = ? WHERE id = ?");
 const stmtDelete = db.prepare("DELETE FROM items WHERE id = ?");
 const stmtReplace = db.prepare("INSERT OR REPLACE INTO items(id, name, value, created_at, updated_at, node_id) VALUES(?, ?, ?, ?, ?, ?)");
+const stmtGetUpdatedAt = db.prepare("SELECT updated_at FROM items WHERE id = ?");
 const stmtList = db.prepare("SELECT id, name, value, created_at, updated_at, node_id FROM items ORDER BY created_at DESC LIMIT 100");
 const stmtGet = db.prepare("SELECT id, name, value, created_at, updated_at, node_id FROM items WHERE id = ?");
 const stmtCount = db.prepare("SELECT COUNT(*) as count FROM items");
@@ -106,20 +109,20 @@ const stmtDeadLetter = db.prepare("INSERT INTO _dead_letter(op, row_id, row_data
 const stmtPendingChanges = db.prepare("SELECT COUNT(*) as count FROM _changes");
 const stmtDeadLetterCount = db.prepare("SELECT COUNT(*) as count FROM _dead_letter");
 
-// --- Batch ship (ACK-based: returns true only if peer confirms batch_id) ---
+// --- Batch ship (ACK-based: returns "ack", "mismatch", or "conn_error") ---
 async function shipBatch(batchId, changes) {
-	if (!PEER_URL || changes.length === 0) return true;
+	if (!PEER_URL || changes.length === 0) return "ack";
 	try {
 		const resp = await fetch(`${PEER_URL}/sync`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json", "X-Node-Id": ID },
 			body: JSON.stringify({ batch_id: batchId, changes }),
 		});
-		if (!resp.ok) return false;
+		if (!resp.ok) return "mismatch";
 		const body = await resp.json();
-		return body.ack === batchId;
+		return body.ack === batchId ? "ack" : "mismatch";
 	} catch {
-		return false;
+		return "conn_error";
 	}
 }
 
@@ -143,17 +146,28 @@ setInterval(() => {
 	shipping = true;
 	(async () => {
 		try {
+			let connError = false;
 			for (let attempt = 0; attempt < BACKOFF_MS.length; attempt++) {
-				const ok = await shipBatch(batchId, changes);
-				if (ok) {
+				const status = await shipBatch(batchId, changes);
+				if (status === "ack") {
 					stmtDeleteChanges.run(batchId);
 					return;
+				}
+				if (status === "conn_error") {
+					connError = true;
+				} else {
+					connError = false;
 				}
 				if (attempt < BACKOFF_MS.length - 1) {
 					await new Promise((resolve) => setTimeout(resolve, BACKOFF_MS[attempt]));
 				}
 			}
-			// All retries exhausted → dead-letter the batch, then clear
+			if (connError) {
+				// Peer unreachable — keep changes in _changes, try again next tick
+				console.error(`[${ID}] peer unreachable, keeping ${rows.length} changes for next tick`);
+				return;
+			}
+			// ACK mismatch (protocol error) → dead-letter the batch, then clear
 			const now = Date.now();
 			for (const r of rows) {
 				stmtDeadLetter.run(r.op, r.row_id, r.row_data, now, BACKOFF_MS.length);
@@ -174,10 +188,18 @@ const applyChanges = db.transaction((changes) => {
 			if (c.op === "INSERT" || c.op === "UPDATE") {
 				if (!c.row) continue;
 				const r = c.row;
+				// Last-write-wins: skip if existing row is newer than incoming
+				const existing = stmtGetUpdatedAt.get(r.id);
+				if (existing && existing.updated_at > r.updated_at) continue;
 				stmtReplace.run(r.id, r.name, r.value, r.created_at, r.updated_at, r.node_id);
 				applied++;
 			} else if (c.op === "DELETE") {
 				if (!c.old_id) continue;
+				// Last-write-wins: skip delete if row was updated after deletion
+				if (c.row) {
+					const existing = stmtGetUpdatedAt.get(c.old_id);
+					if (existing && existing.updated_at > c.row.updated_at) continue;
+				}
 				stmtDelete.run(c.old_id);
 				applied++;
 			}

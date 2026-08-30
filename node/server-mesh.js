@@ -114,7 +114,9 @@ db.exec(`
 	CREATE TRIGGER IF NOT EXISTS items_ad AFTER DELETE ON items
 	WHEN (SELECT value FROM _meta WHERE key = 'syncing') = 0
 	BEGIN
-		INSERT INTO _changes(op, row_id, row_data) VALUES('DELETE', OLD.id, NULL);
+		INSERT INTO _changes(op, row_id, row_data) VALUES('DELETE', OLD.id,
+			json_object('id', OLD.id, 'name', OLD.name, 'value', OLD.value,
+				'created_at', OLD.created_at, 'updated_at', OLD.updated_at, 'node_id', OLD.node_id));
 	END;
 `);
 
@@ -128,6 +130,9 @@ const stmtUpdate = db.prepare(
 const stmtDelete = db.prepare("DELETE FROM items WHERE id = ?");
 const stmtReplace = db.prepare(
 	"INSERT OR REPLACE INTO items(id, name, value, created_at, updated_at, node_id) VALUES(?, ?, ?, ?, ?, ?)",
+);
+const stmtGetUpdatedAt = db.prepare(
+	"SELECT updated_at FROM items WHERE id = ?",
 );
 const stmtList = db.prepare(
 	"SELECT id, name, value, created_at, updated_at, node_id FROM items ORDER BY created_at DESC LIMIT 100",
@@ -244,6 +249,9 @@ const applyChanges = db.transaction((changes) => {
 			if (c.op === "INSERT" || c.op === "UPDATE") {
 				if (!c.row) continue;
 				const r = c.row;
+				// Last-write-wins: skip if existing row is newer than incoming
+				const existing = stmtGetUpdatedAt.get(r.id);
+				if (existing && existing.updated_at > r.updated_at) continue;
 				stmtReplace.run(
 					r.id,
 					r.name,
@@ -255,6 +263,11 @@ const applyChanges = db.transaction((changes) => {
 				applied++;
 			} else if (c.op === "DELETE") {
 				if (!c.old_id) continue;
+				// Last-write-wins: skip delete if row was updated after deletion
+				if (c.row) {
+					const existing = stmtGetUpdatedAt.get(c.old_id);
+					if (existing && existing.updated_at > c.row.updated_at) continue;
+				}
 				stmtDelete.run(c.old_id);
 				applied++;
 			}

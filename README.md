@@ -1,6 +1,37 @@
 # hook-sync
 
-Multi-language SQLite replication. Change capture via SQLite triggers + `_changes` table, ACK-based batched HTTP sync, UUID primary keys. Go, Bun, and Node implementations speak the same wire protocol and sync to each other. Supports point-to-point (2 nodes), full mesh (3-7 nodes), and dedicated hub / star (8+ nodes) topologies. Cross-server benchmark: 3.8x faster than Postgres at batch 10K, 100K items converge in 2s with zero data loss.
+> SQLite replication that just works. Multi-server, multi-writer, multi-runtime. Zero data loss.
+
+SQLite is the fastest database in the world — 394K QPS in raw mode, zero config, single file. But it can't replicate. Until now.
+
+hook-sync adds replication to SQLite via triggers + HTTP sync. No consensus algorithm. No Raft. No coordinator. Just triggers, ACK, and UUID. The result: **3.8x faster than Postgres at batch 10K**, with multi-writer active-active, crash recovery, and split-brain safety — all in a single binary.
+
+```
+Your app writes to SQLite (native speed)
+  → Trigger captures change to _changes table (same transaction)
+  → Background timer ships to peers via HTTP
+  → Peer applies with timestamp conflict check
+  → ACK confirms → delete from _changes
+  → If peer is down: changes accumulate, retry on reconnect
+  → If process crashes: changes survive in SQLite, resume on restart
+```
+
+**Write speed is identical with or without peers.** Sync runs in the background — it never blocks the write path. You get a live replica for free.
+
+## Why hook-sync?
+
+| Problem | Postgres | Litestream | rqlite | hook-sync |
+|---------|----------|------------|--------|-----------|
+| Replication | ✅ WAL streaming | ✅ WAL to S3 | ✅ Raft consensus | ✅ Trigger + ACK |
+| Multi-writer | ❌ Primary-only | ❌ Read-only replica | ❌ Leader-only | ✅ All nodes write |
+| Zero write penalty | ❌ WAL sender overhead | ✅ Async | ❌ Raft quorum per write | ✅ Async, 0% overhead |
+| Cross-runtime | ❌ C server only | ❌ Go only | ❌ Go only | ✅ Go, Bun, Node interop |
+| Split-brain safety | ✅ Sync replication | ❌ | ✅ Raft | ✅ Timestamp LWW |
+| Crash recovery | ✅ WAL replay | ✅ S3 restore | ✅ Raft log | ✅ `_changes` replay |
+| Setup complexity | Cluster + replication config | S3 bucket + config | 3-node Raft cluster | `./hook-sync-go -peer http://...` |
+| Speed (batch 10K) | 8,278 QPS | N/A | N/A (Raft quorum) | **31,558 QPS** |
+
+hook-sync occupies a gap no other project fills: **SQLite simplicity + multi-writer replication + cross-runtime interop**, without consensus overhead.
 
 ## How It Works
 
@@ -11,6 +42,7 @@ App write (native SQLite speed)
   → Drain mode: ships until _changes is empty within each tick
   → HTTP POST {batch_id, changes} to peer
   → Peer: INSERT OR REPLACE (UUID PK = zero conflict)
+         + timestamp check (last-write-wins for split-brain safety)
   → Peer returns {applied, ack: batch_id}
   → Sender deletes from _changes only after ACK confirms
 ```
@@ -19,11 +51,23 @@ In full mesh mode, the sender ships to all peers concurrently. Each peer has its
 
 Sync runs in the background — it does not block the write path. The client gets its response as soon as SQLite write + capture completes.
 
+### Split-brain safety
+
+When the network splits and both nodes accept writes independently, hook-sync uses **last-write-wins by timestamp** to resolve conflicts on reconnect:
+
+| Scenario | During partition | On reconnect | Data loss? |
+|----------|-----------------|-------------|-----------|
+| INSERT (new rows) | Both create different UUIDs | Merge — both rows appear | ❌ None |
+| UPDATE same row | Node A: value=100, Node B: value=200 | Converge to higher `updated_at` | Older update dropped |
+| DELETE vs UPDATE | Node A deletes, Node B updates | UPDATE wins if newer than delete | Delete intent dropped |
+
+Both nodes always converge to the same state. No divergence, no silent corruption. Tested: `bash bench-splitbrain.sh` — 12/12 PASS.
+
 ### ACK-based reliability
 
 Changes are persisted in `_changes` at write time (same transaction via triggers). If the process crashes, un-shipped changes survive and resume on restart.
 
-Ship failures retry with exponential backoff (50/100/200/400/800ms, 5 attempts). After 5 failures, changes move to `_dead_letter` table for manual review.
+Ship failures retry with exponential backoff (50/100/200/400/800ms, 5 attempts). **Connection errors (peer unreachable) never dead-letter** — changes stay in `_changes` and retry every tick until the peer reconnects. Dead letter is reserved for ACK mismatch (protocol error) only.
 
 `INSERT OR REPLACE` with UUID PK makes re-sends idempotent — shipping the same batch 10 times produces the same result, no duplicates.
 
@@ -41,12 +85,12 @@ Multi-writer without UUID = data loss. Integer auto-increment collides across no
 
 ```
 hook-sync/
-├── PROTOCOL.md               # Wire protocol spec
+├── PROTOCOL.md               # Wire protocol spec (copy to any language)
 ├── TOPOLOGY.md               # Topology recommendations (point-to-point, full mesh, hub)
 ├── go/                       # Go implementation (Fiber + mattn/go-sqlite3)
 │   ├── main.go               #   single-table, point-to-point
 │   ├── mesh/main.go          #   full mesh (multi-peer, per-peer watermark)
-│   ├── hub/main.go          #   dedicated hub (Pebble KV, star topology relay)
+│   ├── hub/main.go           #   dedicated hub (Pebble KV, star topology relay)
 │   ├── multitable/main.go    #   multi-table (items + categories)
 │   └── bench/                #   direct SQLite benchmarks
 ├── bun/                      # Bun implementation (Bun.serve + bun:sqlite)
@@ -59,7 +103,8 @@ hook-sync/
 │   └── server-multitable.js  #   multi-table
 ├── bench-dual-ack.sh         # Dual-writer benchmark, point-to-point (all 3 runtimes)
 ├── bench-fullmesh.sh         # Full mesh benchmark, 4 nodes all-to-all (all 3 runtimes)
-├── bench-hub.sh             # Dedicated hub benchmark, 1 hub + 3 edges (all 3 runtimes)
+├── bench-hub.sh              # Dedicated hub benchmark, 1 hub + 3 edges (all 3 runtimes)
+├── bench-splitbrain.sh       # Split-brain safety test (partition, conflict, reconnect)
 ├── hook-sync-go              # Go binary (point-to-point, single-table)
 ├── hook-sync-mesh-go         # Go binary (full mesh, multi-peer)
 ├── hook-sync-hub             # Go binary (dedicated hub, Pebble KV)
@@ -75,7 +120,7 @@ hook-sync/
 | Bun | SQLite triggers + `_changes` | bun:sqlite (built-in) | Bun.serve (native) |
 | Node | SQLite triggers + `_changes` | better-sqlite3 | hyper-express (uWebSockets) |
 
-All implementations use the same capture mechanism (triggers + `_changes` table) and the same wire protocol. Nodes in different languages sync to each other bidirectionally.
+All implementations use the same capture mechanism (triggers + `_changes` table) and the same wire protocol. Nodes in different languages sync to each other bidirectionally. See [PROTOCOL.md](PROTOCOL.md) — copy it into any language.
 
 ## Build & Run
 
@@ -112,7 +157,7 @@ node server.js --id node3 --db ../node3.db --listen :9003 --peer http://localhos
 bun run bun/server.ts --id bun1 --db bun1.db --listen :9002 --peer http://localhost:9001
 ```
 
-Both nodes sync bidirectionally — same wire protocol, same ACK-based reliability.
+Both nodes sync bidirectionally — same wire protocol, same ACK-based reliability, same split-brain safety.
 
 ### Full mesh (multi-peer)
 
@@ -175,11 +220,11 @@ See [PROTOCOL.md](PROTOCOL.md) for full spec.
 | Method | Path | Description |
 |---|---|---|
 | `POST` | `/api/items` | Create item (local write, triggers sync) |
+| `POST` | `/api/items/batch` | Create multiple items in one transaction (batch write) |
 | `GET` | `/api/items` | List items (latest 100) |
 | `GET` | `/api/items/:id` | Get single item |
 | `PUT` | `/api/items/:id` | Update item |
 | `DELETE` | `/api/items/:id` | Delete item |
-| `POST` | `/api/items/batch` | Create multiple items in one transaction (batch write) |
 | `POST` | `/sync` | Receive change batch with ACK (internal) |
 | `GET` | `/health` | Health + item count + pending changes + dead letter count + per-peer watermarks (mesh) |
 
@@ -262,9 +307,21 @@ Tested: kill node mid-write → changes survive in `_changes` table → restart 
 
 Tested: peer unreachable → 5 retries with backoff → changes moved to `_dead_letter` → pending cleared. PASS.
 
+### Split-brain safety
+
+Tested: `bash bench-splitbrain.sh` — 12/12 PASS.
+
+| Scenario | Result |
+|----------|--------|
+| INSERT during partition | ✅ Converge — UUID, no collision |
+| UPDATE same row during partition | ✅ Converge — last-write-wins by timestamp |
+| DELETE vs UPDATE during partition | ✅ Converge — UPDATE wins if newer |
+| Connection failure (peer down) | ✅ Retry next tick — no dead letter, no data loss |
+| Crash recovery | ✅ Changes survive in `_changes`, resume on restart |
+
 ### Cross-server vs Postgres (100K writes, real network, fair durability)
 
-2 VPS (OVH Canada + 1TIM Asia, ~2-4ms RTT). Same Go HTTP client, concurrency 10. Both with active replication. Both fast durability (SQLite `synchronous=NORMAL` vs Postgres `synchronous_commit=off`).
+2 VPS (OVH Singapore + 1TIM Singapore, ~2.7ms RTT, 290 Mbps). Same Go HTTP client, concurrency 10. Both with active replication. Both fast durability (SQLite `synchronous=NORMAL` vs Postgres `synchronous_commit=off`).
 
 | Mode | hook-sync (SQLite) | Postgres | Advantage |
 |------|--------:|--------:|--------:|
@@ -292,7 +349,7 @@ Full report: [BENCHMARK-REPORT.md](BENCHMARK-REPORT.md)
 - Multi-table sync (items + categories) across all runtime pairs ✅
 - ACK-based delivery: no data loss on ship failure ✅
 - Crash recovery: changes survive in `_changes`, sync resumes on restart ✅
-- Dead letter: 5 retries → `_dead_letter` table ✅
+- Dead letter: ACK mismatch → `_dead_letter` table ✅
 - Integrity: 10/10 runs PASS (2000 items per node, 0 pending, 0 dead letter) ✅
 - Sync does not block write path ✅
 - Idle = zero traffic (timer no-op on empty `_changes`) ✅
@@ -302,16 +359,33 @@ Full report: [BENCHMARK-REPORT.md](BENCHMARK-REPORT.md)
 - Dedicated hub (Pebble KV): Go hub + 3 Go edges, star topology, multi-writer converge ✅
 - Hub crash recovery: kill hub mid-traffic → Pebble fwd queue survives → restart → all edges converge ✅
 - Cross-runtime star: Go hub + Go/Bun/Node edges, all converge, 0 pending, 0 dead letter ✅
-- Cross-server vs Postgres: 100K writes, OVH Canada + 1TIM Asia, fair durability, 3.8x faster at batch 10K ✅
+- Cross-server vs Postgres: 100K writes, OVH + 1TIM, fair durability, 3.8x faster at batch 10K ✅
 - Batch scaling: hook-sync plateaus at 31K QPS, Postgres degrades at batch 10K ✅
 - Convergence: 100K items in 2s (batch-size 10000 + drain mode), zero data loss ✅
 - Sync overhead: ~0% (with peer vs without peer = noise) ✅
+- Split-brain: INSERT/UPDATE/DELETE conflicts converge, 12/12 PASS ✅
+- Connection error retry: peer unreachable → no dead letter, retry next tick ✅
+
+## Implement in Your Language
+
+The protocol is language-agnostic. Read [PROTOCOL.md](PROTOCOL.md) — it's ~300 lines. You need:
+
+1. SQLite database with `_changes`, `_meta`, `_dead_letter` tables
+2. Triggers on your data tables that capture changes to `_changes`
+3. Background ship loop: read `_changes`, POST to peer, delete on ACK
+4. `/sync` endpoint: receive changes, apply with timestamp conflict check, return ACK
+5. `syncing` flag to prevent infinite loop
+
+No consensus. No Raft. No coordinator. Just triggers + HTTP + ACK.
+
+Reference implementations: `go/main.go` (~300 lines), `bun/server.ts` (~200 lines), `node/server.js` (~200 lines). All three sync to each other.
 
 ## Limitations
 
 - **No multi-region topology** — point-to-point, full mesh, and dedicated hub all work. Multi-region (hubs in full mesh) not yet built — needs origin tracking for loop prevention (see [TOPOLOGY.md](TOPOLOGY.md))
 - **Multi-table requires manual setup** — adding a table means writing triggers + updating applyChanges dispatch (see `go/multitable/`, `bun/server-multitable.ts`, `node/server-multitable.js` for 2-table example)
 - **Localhost benchmark variance** — HTTP throughput varies 3-8x on localhost; use real network for reliable comparison
+- **Last-write-wins, not CRDT** — split-brain conflicts resolve by timestamp. Older update is silently dropped. Fine for append-heavy workloads; for collaborative editing of shared rows, use cr-sqlite
 
 ## License
 

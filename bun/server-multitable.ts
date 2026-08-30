@@ -44,6 +44,7 @@ db.exec(`
 		name TEXT,
 		parent_id TEXT,
 		created_at INTEGER,
+		updated_at INTEGER,
 		node_id TEXT
 	);
 
@@ -94,7 +95,9 @@ db.exec(`
 	CREATE TRIGGER IF NOT EXISTS items_ad AFTER DELETE ON items
 	WHEN (SELECT value FROM _meta WHERE key = 'syncing') = 0
 	BEGIN
-		INSERT INTO _changes(table_name, op, row_id, row_data) VALUES('items', 'DELETE', OLD.id, NULL);
+		INSERT INTO _changes(table_name, op, row_id, row_data) VALUES('items', 'DELETE', OLD.id,
+			json_object('id', OLD.id, 'name', OLD.name, 'value', OLD.value,
+				'created_at', OLD.created_at, 'updated_at', OLD.updated_at, 'node_id', OLD.node_id));
 	END;
 
 	-- categories triggers
@@ -103,7 +106,7 @@ db.exec(`
 	BEGIN
 		INSERT INTO _changes(table_name, op, row_id, row_data) VALUES('categories', 'INSERT', NEW.id,
 			json_object('id', NEW.id, 'name', NEW.name, 'parent_id', NEW.parent_id,
-				'created_at', NEW.created_at, 'node_id', NEW.node_id));
+				'created_at', NEW.created_at, 'updated_at', NEW.updated_at, 'node_id', NEW.node_id));
 	END;
 
 	CREATE TRIGGER IF NOT EXISTS cat_au AFTER UPDATE ON categories
@@ -111,13 +114,15 @@ db.exec(`
 	BEGIN
 		INSERT INTO _changes(table_name, op, row_id, row_data) VALUES('categories', 'UPDATE', NEW.id,
 			json_object('id', NEW.id, 'name', NEW.name, 'parent_id', NEW.parent_id,
-				'created_at', NEW.created_at, 'node_id', NEW.node_id));
+				'created_at', NEW.created_at, 'updated_at', NEW.updated_at, 'node_id', NEW.node_id));
 	END;
 
 	CREATE TRIGGER IF NOT EXISTS cat_ad AFTER DELETE ON categories
 	WHEN (SELECT value FROM _meta WHERE key = 'syncing') = 0
 	BEGIN
-		INSERT INTO _changes(table_name, op, row_id, row_data) VALUES('categories', 'DELETE', OLD.id, NULL);
+		INSERT INTO _changes(table_name, op, row_id, row_data) VALUES('categories', 'DELETE', OLD.id,
+			json_object('id', OLD.id, 'name', OLD.name, 'parent_id', OLD.parent_id,
+				'created_at', OLD.created_at, 'updated_at', OLD.updated_at, 'node_id', OLD.node_id));
 	END;
 `);
 
@@ -134,14 +139,21 @@ const stmtListItems = db.prepare(
 );
 
 const stmtInsertCat = db.prepare(
-	"INSERT INTO categories(id, name, parent_id, created_at, node_id) VALUES(?, ?, ?, ?, ?)",
+	"INSERT INTO categories(id, name, parent_id, created_at, updated_at, node_id) VALUES(?, ?, ?, ?, ?, ?)",
 );
 const stmtReplaceCat = db.prepare(
-	"INSERT OR REPLACE INTO categories(id, name, parent_id, created_at, node_id) VALUES(?, ?, ?, ?, ?)",
+	"INSERT OR REPLACE INTO categories(id, name, parent_id, created_at, updated_at, node_id) VALUES(?, ?, ?, ?, ?, ?)",
 );
 const stmtDeleteCat = db.prepare("DELETE FROM categories WHERE id = ?");
 const stmtListCats = db.prepare(
-	"SELECT id, name, parent_id, created_at, node_id FROM categories ORDER BY created_at DESC LIMIT 100",
+	"SELECT id, name, parent_id, created_at, updated_at, node_id FROM categories ORDER BY created_at DESC LIMIT 100",
+);
+
+const stmtGetItemUpdatedAt = db.prepare(
+	"SELECT updated_at FROM items WHERE id = ?",
+);
+const stmtGetCatUpdatedAt = db.prepare(
+	"SELECT updated_at FROM categories WHERE id = ?",
 );
 
 const stmtChanges = db.prepare(
@@ -170,19 +182,19 @@ const stmtDeadLetterCount = db.prepare(
 async function shipBatch(
 	batchId: number,
 	changes: unknown[],
-): Promise<boolean> {
-	if (!PEER_URL || changes.length === 0) return true;
+): Promise<"acked" | "conn_error" | "ack_mismatch"> {
+	if (!PEER_URL || changes.length === 0) return "acked";
 	try {
 		const resp = await fetch(`${PEER_URL}/sync`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json", "X-Node-Id": ID },
 			body: JSON.stringify({ batch_id: batchId, changes }),
 		});
-		if (!resp.ok) return false;
+		if (!resp.ok) return "conn_error";
 		const body = (await resp.json()) as { applied: number; ack: number };
-		return body.ack === batchId;
+		return body.ack === batchId ? "acked" : "ack_mismatch";
 	} catch {
-		return false;
+		return "conn_error";
 	}
 }
 
@@ -211,18 +223,26 @@ setInterval(() => {
 	shipping = true;
 	(async () => {
 		try {
+			let connError = false;
 			for (let attempt = 0; attempt < BACKOFF_MS.length; attempt++) {
-				const ok = await shipBatch(batchId, changes);
-				if (ok) {
+				const status = await shipBatch(batchId, changes);
+				if (status === "acked") {
 					stmtDeleteChanges.run(batchId);
 					return;
 				}
+				connError = status === "conn_error";
 				if (attempt < BACKOFF_MS.length - 1) {
 					const { promise, resolve } = Promise.withResolvers<void>();
 					setTimeout(resolve, BACKOFF_MS[attempt]);
 					await promise;
 				}
 			}
+			if (connError) {
+				// Peer not reachable — keep changes in _changes, try again next tick
+				console.error(`[${ID}] peer unreachable, keeping ${rows.length} changes for next tick`);
+				return;
+			}
+			// ACK mismatch (protocol error) — dead-letter the batch, then clear
 			const now = Date.now();
 			for (const r of rows) {
 				stmtDeadLetter.run(
@@ -254,57 +274,85 @@ const applyChanges = db.transaction(
 		stmtSyncOn.run();
 		let applied = 0;
 		try {
-			for (const c of changes) {
-				if (c.table === "items") {
-					if (c.op === "INSERT" || c.op === "UPDATE") {
-						if (!c.row) continue;
-						const r = c.row as {
-							id: string;
-							name: string;
-							value: number;
-							created_at: number;
-							updated_at: number;
-							node_id: string;
-						};
-						stmtReplaceItem.run(
-							r.id,
-							r.name,
-							r.value,
-							r.created_at,
-							r.updated_at,
-							r.node_id,
-						);
-						applied++;
-					} else if (c.op === "DELETE") {
-						if (!c.old_id) continue;
-						stmtDeleteItem.run(c.old_id);
-						applied++;
+		for (const c of changes) {
+			if (c.table === "items") {
+				if (c.op === "INSERT" || c.op === "UPDATE") {
+					if (!c.row) continue;
+					const r = c.row as {
+						id: string;
+						name: string;
+						value: number;
+						created_at: number;
+						updated_at: number;
+						node_id: string;
+					};
+					// Last-write-wins: skip if existing row is newer than incoming
+					const existing = stmtGetItemUpdatedAt.get(r.id) as { updated_at: number } | null;
+					if (existing && existing.updated_at > r.updated_at) {
+						continue;
 					}
-				} else if (c.table === "categories") {
-					if (c.op === "INSERT" || c.op === "UPDATE") {
-						if (!c.row) continue;
-						const r = c.row as {
-							id: string;
-							name: string;
-							parent_id: string | null;
-							created_at: number;
-							node_id: string;
-						};
-						stmtReplaceCat.run(
-							r.id,
-							r.name,
-							r.parent_id,
-							r.created_at,
-							r.node_id,
-						);
-						applied++;
-					} else if (c.op === "DELETE") {
-						if (!c.old_id) continue;
-						stmtDeleteCat.run(c.old_id);
-						applied++;
+					stmtReplaceItem.run(
+						r.id,
+						r.name,
+						r.value,
+						r.created_at,
+						r.updated_at,
+						r.node_id,
+					);
+					applied++;
+				} else if (c.op === "DELETE") {
+					if (!c.old_id) continue;
+					// Last-write-wins: skip delete if row was updated after deletion
+					if (c.row) {
+						const deleteUpdatedAt = (c.row as { updated_at: number }).updated_at;
+						const existing = stmtGetItemUpdatedAt.get(c.old_id) as { updated_at: number } | null;
+						if (existing && existing.updated_at > deleteUpdatedAt) {
+							continue; // row was updated after delete, keep the update
+						}
 					}
+					stmtDeleteItem.run(c.old_id);
+					applied++;
+				}
+			} else if (c.table === "categories") {
+				if (c.op === "INSERT" || c.op === "UPDATE") {
+					if (!c.row) continue;
+					const r = c.row as {
+						id: string;
+						name: string;
+						parent_id: string | null;
+						created_at: number;
+						updated_at: number;
+						node_id: string;
+					};
+					// Last-write-wins: skip if existing row is newer than incoming
+					const existing = stmtGetCatUpdatedAt.get(r.id) as { updated_at: number } | null;
+					if (existing && existing.updated_at > r.updated_at) {
+						continue;
+					}
+					stmtReplaceCat.run(
+						r.id,
+						r.name,
+						r.parent_id,
+						r.created_at,
+						r.updated_at,
+						r.node_id,
+					);
+					applied++;
+				} else if (c.op === "DELETE") {
+					if (!c.old_id) continue;
+					// Last-write-wins: skip delete if row was updated after deletion
+					if (c.row) {
+						const deleteUpdatedAt = (c.row as { updated_at: number }).updated_at;
+						const existing = stmtGetCatUpdatedAt.get(c.old_id) as { updated_at: number } | null;
+						if (existing && existing.updated_at > deleteUpdatedAt) {
+							continue; // row was updated after delete, keep the update
+						}
+					}
+					stmtDeleteCat.run(c.old_id);
+					applied++;
 				}
 			}
+		}
 		} finally {
 			stmtSyncOff.run();
 		}
@@ -376,13 +424,14 @@ const server = Bun.serve({
 				.then((body: { name: string; parent_id?: string }) => {
 					const id = crypto.randomUUID();
 					const now = Date.now();
-					stmtInsertCat.run(id, body.name, body.parent_id ?? null, now, ID);
+					stmtInsertCat.run(id, body.name, body.parent_id ?? null, now, now, ID);
 					return Response.json({
 						id,
 						name: body.name,
 						parent_id: body.parent_id ?? null,
 						created_at: now,
 						node_id: ID,
+						updated_at: now,
 					});
 				})
 				.catch((e: unknown) =>

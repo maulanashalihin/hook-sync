@@ -112,7 +112,9 @@ db.exec(`
 	CREATE TRIGGER IF NOT EXISTS items_ad AFTER DELETE ON items
 	WHEN (SELECT value FROM _meta WHERE key = 'syncing') = 0
 	BEGIN
-		INSERT INTO _changes(op, row_id, row_data) VALUES('DELETE', OLD.id, NULL);
+		INSERT INTO _changes(op, row_id, row_data) VALUES('DELETE', OLD.id,
+			json_object('id', OLD.id, 'name', OLD.name, 'value', OLD.value,
+				'created_at', OLD.created_at, 'updated_at', OLD.updated_at, 'node_id', OLD.node_id));
 	END;
 `);
 
@@ -126,6 +128,9 @@ const stmtUpdate = db.prepare(
 const stmtDelete = db.prepare("DELETE FROM items WHERE id = ?");
 const stmtReplace = db.prepare(
 	"INSERT OR REPLACE INTO items(id, name, value, created_at, updated_at, node_id) VALUES(?, ?, ?, ?, ?, ?)",
+);
+const stmtGetUpdatedAt = db.prepare(
+	"SELECT updated_at FROM items WHERE id = ?",
 );
 const stmtList = db.prepare(
 	"SELECT id, name, value, created_at, updated_at, node_id FROM items ORDER BY created_at DESC LIMIT 100",
@@ -169,14 +174,14 @@ const BACKOFF_MS = [50, 100, 200, 400, 800];
 async function shipToPeer(
 	peerUrl: string,
 	lastAcked: number,
-): Promise<boolean> {
+): Promise<"acked" | "conn_error" | "ack_mismatch"> {
 	const rows = stmtPeerChanges.all(lastAcked) as {
 		change_id: number;
 		op: string;
 		row_id: string;
 		row_data: string | null;
 	}[];
-	if (rows.length === 0) return true;
+	if (rows.length === 0) return "acked";
 
 	const batchId = rows[rows.length - 1].change_id;
 	const changes = rows.map((r) => ({
@@ -186,6 +191,7 @@ async function shipToPeer(
 		old_id: r.op === "DELETE" ? r.row_id : null,
 	}));
 
+	let connError = false;
 	for (let attempt = 0; attempt < BACKOFF_MS.length; attempt++) {
 		try {
 			const resp = await fetch(`${peerUrl}/sync`, {
@@ -197,21 +203,29 @@ async function shipToPeer(
 				const body = (await resp.json()) as { applied: number; ack: number };
 				if (body.ack === batchId) {
 					stmtUpdatePeerAck.run(batchId, peerUrl);
-					return true;
+					return "acked";
 				}
+				// ACK mismatch — protocol error, don't retry
+				console.error(
+					`[${ID}] peer ${peerUrl} ACK mismatch: got ${body.ack} want ${batchId}, skipping batch for this peer`,
+				);
+				stmtUpdatePeerAck.run(batchId, peerUrl);
+				return "ack_mismatch";
 			}
+			connError = true;
 		} catch {
 			// network error — retry
+			connError = true;
 		}
 		if (attempt < BACKOFF_MS.length - 1) await Bun.sleep(BACKOFF_MS[attempt]);
 	}
 
-	// Peer unreachable after 5 retries — don't dead-letter, retry next cycle.
+	// Peer unreachable after 5 retries — keep changes, retry next cycle.
 	// Changes stay in _changes until ALL peers ACK (watermark = min(last_acked)).
 	console.error(
 		`[${ID}] peer ${peerUrl} unreachable after 5 retries, will retry next cycle`,
 	);
-	return false;
+	return "conn_error";
 }
 
 // --- Cleanup: delete changes that ALL peers have ACKed ---
@@ -261,26 +275,39 @@ const applyChanges = db.transaction(
 	): number => {
 		stmtSyncOn.run();
 		let applied = 0;
-		try {
-			for (const c of changes) {
-				if (c.op === "INSERT" || c.op === "UPDATE") {
-					if (!c.row) continue;
-					const r = c.row;
-					stmtReplace.run(
-						r.id,
-						r.name,
-						r.value,
-						r.created_at,
-						r.updated_at,
-						r.node_id,
-					);
-					applied++;
-				} else if (c.op === "DELETE") {
-					if (!c.old_id) continue;
-					stmtDelete.run(c.old_id);
-					applied++;
+	try {
+		for (const c of changes) {
+			if (c.op === "INSERT" || c.op === "UPDATE") {
+				if (!c.row) continue;
+				const r = c.row;
+				// Last-write-wins: skip if existing row is newer than incoming
+				const existing = stmtGetUpdatedAt.get(r.id) as { updated_at: number } | null;
+				if (existing && existing.updated_at > r.updated_at) {
+					continue;
 				}
+				stmtReplace.run(
+					r.id,
+					r.name,
+					r.value,
+					r.created_at,
+					r.updated_at,
+					r.node_id,
+				);
+				applied++;
+			} else if (c.op === "DELETE") {
+				if (!c.old_id) continue;
+				// Last-write-wins: skip delete if row was updated after deletion
+				if (c.row) {
+					const deleteUpdatedAt = c.row.updated_at;
+					const existing = stmtGetUpdatedAt.get(c.old_id) as { updated_at: number } | null;
+					if (existing && existing.updated_at > deleteUpdatedAt) {
+						continue; // row was updated after delete, keep the update
+					}
+				}
+				stmtDelete.run(c.old_id);
+				applied++;
 			}
+		}
 		} finally {
 			stmtSyncOff.run();
 		}

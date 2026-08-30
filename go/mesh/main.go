@@ -159,7 +159,9 @@ func (n *Node) setupSchema() {
 		CREATE TRIGGER IF NOT EXISTS items_ad AFTER DELETE ON items
 		WHEN (SELECT value FROM _meta WHERE key = 'syncing') = 0
 		BEGIN
-			INSERT INTO _changes(op, row_id, row_data) VALUES('DELETE', OLD.id, NULL);
+			INSERT INTO _changes(op, row_id, row_data) VALUES('DELETE', OLD.id,
+				json_object('id', OLD.id, 'name', OLD.name, 'value', OLD.value,
+					'created_at', OLD.created_at, 'updated_at', OLD.updated_at, 'node_id', OLD.node_id));
 		END;
 	`)
 	if err != nil {
@@ -280,6 +282,9 @@ func (n *Node) shipToPeer(ps peerState, backoffs []time.Duration) int {
 		c := Change{Op: cr.Op, Table: "items"}
 		if cr.Op == "DELETE" {
 			c.OldID = cr.RowID
+			if cr.RowData != "" {
+				json.Unmarshal([]byte(cr.RowData), &c.Row)
+			}
 		} else if cr.RowData != "" {
 			json.Unmarshal([]byte(cr.RowData), &c.Row)
 		}
@@ -287,22 +292,43 @@ func (n *Node) shipToPeer(ps peerState, backoffs []time.Duration) int {
 	}
 
 	// Ship with retry
-	for attempt := 0; attempt < len(backoffs); attempt++ {
+	acked := false
+	connError := false
+	for attempt := range backoffs {
 		if attempt > 0 {
 			time.Sleep(backoffs[attempt-1] * time.Millisecond)
 		}
 		resp, err := n.shipWithAck(batchID, changes, ps.URL)
 		if err != nil {
+			log.Printf("[%s] ship attempt %d to %s error: %v", n.ID, attempt+1, ps.URL, err)
+			connError = true
 			continue
 		}
+		connError = false
 		if resp.Ack == batchID {
 			n.db.Exec("UPDATE _peer_state SET last_acked = ? WHERE peer_url = ?", batchID, ps.URL)
-			return len(crs)
+			acked = true
+			break
 		}
+		log.Printf("[%s] ship attempt %d to %s ACK mismatch: got %d want %d", n.ID, attempt+1, ps.URL, resp.Ack, batchID)
 	}
 
-	log.Printf("[%s] peer %s unreachable after %d retries, will retry next cycle", n.ID, ps.URL, len(backoffs))
-	return 0
+	if !acked {
+		if connError {
+			// Peer not reachable — keep changes in _changes, try again next tick
+			log.Printf("[%s] peer %s unreachable, keeping %d changes for next tick", n.ID, ps.URL, len(crs))
+			return 0
+		}
+		// ACK mismatch — dead letter and advance watermark so this peer moves on
+		log.Printf("[%s] ship to %s failed after %d retries (ACK mismatch), moving to _dead_letter", n.ID, ps.URL, len(backoffs))
+		for _, cr := range crs {
+			n.db.Exec("INSERT INTO _dead_letter(op, row_id, row_data, failed_at, retry_count) VALUES(?, ?, ?, ?, ?)",
+				cr.Op, cr.RowID, cr.RowData, time.Now().UnixMilli(), len(backoffs))
+		}
+		n.db.Exec("UPDATE _peer_state SET last_acked = ? WHERE peer_url = ?", batchID, ps.URL)
+	}
+	return len(crs)
+
 }
 
 func (n *Node) shipWithAck(batchID int64, changes []Change, peerURL string) (*SyncResponse, error) {
@@ -518,6 +544,14 @@ func (n *Node) applyChanges(changes []Change) int {
 			updatedAt := toInt64(c.Row["updated_at"])
 			nodeID, _ := c.Row["node_id"].(string)
 
+			// Last-write-wins: skip if existing row is newer than incoming
+			var existingUpdatedAt int64
+			if err := tx.QueryRow("SELECT updated_at FROM items WHERE id = ?", id).Scan(&existingUpdatedAt); err == nil {
+				if existingUpdatedAt > updatedAt {
+					continue
+				}
+			}
+
 			_, err := tx.Exec(
 				"INSERT OR REPLACE INTO items(id, name, value, created_at, updated_at, node_id) VALUES(?, ?, ?, ?, ?, ?)",
 				id, name, value, createdAt, updatedAt, nodeID,
@@ -531,6 +565,16 @@ func (n *Node) applyChanges(changes []Change) int {
 		case "DELETE":
 			if c.OldID == "" {
 				continue
+			}
+			// Last-write-wins: skip delete if row was updated after deletion
+			if c.Row != nil {
+				deleteUpdatedAt := toInt64(c.Row["updated_at"])
+				var existingUpdatedAt int64
+				if err := tx.QueryRow("SELECT updated_at FROM items WHERE id = ?", c.OldID).Scan(&existingUpdatedAt); err == nil {
+					if existingUpdatedAt > deleteUpdatedAt {
+						continue // row was updated after delete, keep the update
+					}
+				}
 			}
 			_, err := tx.Exec("DELETE FROM items WHERE id = ?", c.OldID)
 			if err != nil {

@@ -45,12 +45,12 @@ type Node struct {
 
 func main() {
 	var (
-		id      = flag.String("id", "", "node ID")
-		dbPath  = flag.String("db", "", "SQLite DB path")
-		listen  = flag.String("listen", "", "HTTP listen address")
-		batchMs = flag.Int("batch-ms", 50, "batch ship interval ms")
+		id        = flag.String("id", "", "node ID")
+		dbPath    = flag.String("db", "", "SQLite DB path")
+		listen    = flag.String("listen", "", "HTTP listen address")
+		batchMs   = flag.Int("batch-ms", 50, "batch ship interval ms")
 		batchSize = flag.Int("batch-size", 10000, "max changes per ship batch")
-		peerURL = flag.String("peer", "", "peer URL")
+		peerURL   = flag.String("peer", "", "peer URL")
 	)
 	flag.Parse()
 
@@ -73,7 +73,7 @@ func main() {
 	node.startHTTP()
 
 	log.Printf("[%s] listening on %s, peer=%s", *id, *listen, *peerURL)
-	select{}
+	select {}
 }
 
 func (n *Node) initDB() {
@@ -102,6 +102,7 @@ func (n *Node) setupSchema() {
 			name TEXT,
 			parent_id TEXT,
 			created_at INTEGER,
+			updated_at INTEGER,
 			node_id TEXT
 		);
 
@@ -149,7 +150,9 @@ func (n *Node) setupSchema() {
 		CREATE TRIGGER IF NOT EXISTS items_ad AFTER DELETE ON items
 		WHEN (SELECT value FROM _meta WHERE key = 'syncing') = 0
 		BEGIN
-			INSERT INTO _changes(table_name, op, row_id, row_data) VALUES('items', 'DELETE', OLD.id, NULL);
+			INSERT INTO _changes(table_name, op, row_id, row_data) VALUES('items', 'DELETE', OLD.id,
+				json_object('id', OLD.id, 'name', OLD.name, 'value', OLD.value,
+					'created_at', OLD.created_at, 'updated_at', OLD.updated_at, 'node_id', OLD.node_id));
 		END;
 
 		-- categories triggers
@@ -158,7 +161,7 @@ func (n *Node) setupSchema() {
 		BEGIN
 			INSERT INTO _changes(table_name, op, row_id, row_data) VALUES('categories', 'INSERT', NEW.id,
 				json_object('id', NEW.id, 'name', NEW.name, 'parent_id', NEW.parent_id,
-					'created_at', NEW.created_at, 'node_id', NEW.node_id));
+				'created_at', NEW.created_at, 'updated_at', NEW.updated_at, 'node_id', NEW.node_id));
 		END;
 
 		CREATE TRIGGER IF NOT EXISTS cat_au AFTER UPDATE ON categories
@@ -166,13 +169,15 @@ func (n *Node) setupSchema() {
 		BEGIN
 			INSERT INTO _changes(table_name, op, row_id, row_data) VALUES('categories', 'UPDATE', NEW.id,
 				json_object('id', NEW.id, 'name', NEW.name, 'parent_id', NEW.parent_id,
-					'created_at', NEW.created_at, 'node_id', NEW.node_id));
+				'created_at', NEW.created_at, 'updated_at', NEW.updated_at, 'node_id', NEW.node_id));
 		END;
 
 		CREATE TRIGGER IF NOT EXISTS cat_ad AFTER DELETE ON categories
 		WHEN (SELECT value FROM _meta WHERE key = 'syncing') = 0
 		BEGIN
-			INSERT INTO _changes(table_name, op, row_id, row_data) VALUES('categories', 'DELETE', OLD.id, NULL);
+			INSERT INTO _changes(table_name, op, row_id, row_data) VALUES('categories', 'DELETE', OLD.id,
+				json_object('id', OLD.id, 'name', OLD.name, 'parent_id', OLD.parent_id,
+					'created_at', OLD.created_at, 'updated_at', OLD.updated_at, 'node_id', OLD.node_id));
 		END;
 	`)
 	if err != nil {
@@ -231,6 +236,9 @@ func (n *Node) batchShip() {
 				c := Change{Op: cr.Op, Table: cr.TableName}
 				if cr.Op == "DELETE" {
 					c.OldID = cr.RowID
+					if cr.RowData != "" {
+						json.Unmarshal([]byte(cr.RowData), &c.Row)
+					}
 				} else if cr.RowData != "" {
 					json.Unmarshal([]byte(cr.RowData), &c.Row)
 				}
@@ -238,6 +246,7 @@ func (n *Node) batchShip() {
 			}
 
 			acked := false
+			connError := false
 			for attempt := 0; attempt < 5; attempt++ {
 				if attempt > 0 {
 					time.Sleep(backoffs[attempt-1] * time.Millisecond)
@@ -245,17 +254,24 @@ func (n *Node) batchShip() {
 				resp, err := n.shipWithAck(batchID, changes)
 				if err != nil {
 					log.Printf("[%s] ship attempt %d error: %v", n.ID, attempt+1, err)
+					connError = true
 					continue
 				}
+				connError = false
 				if resp.Ack == batchID {
 					n.db.Exec("DELETE FROM _changes WHERE change_id <= ?", batchID)
 					acked = true
 					break
 				}
+				log.Printf("[%s] ship attempt %d ACK mismatch: got %d want %d", n.ID, attempt+1, resp.Ack, batchID)
 			}
 
 			if !acked {
-				log.Printf("[%s] ship failed after 5 retries, moving to _dead_letter", n.ID)
+				if connError {
+					log.Printf("[%s] peer unreachable, keeping %d changes for next tick", n.ID, len(crs))
+					break
+				}
+				log.Printf("[%s] ship failed after 5 retries (ACK mismatch), moving to _dead_letter", n.ID)
 				for _, cr := range crs {
 					n.db.Exec("INSERT INTO _dead_letter(table_name, op, row_id, row_data, failed_at, retry_count) VALUES(?, ?, ?, ?, ?, ?)",
 						cr.TableName, cr.Op, cr.RowID, cr.RowData, time.Now().UnixMilli(), 5)
@@ -360,7 +376,7 @@ func (n *Node) startHTTP() {
 
 	// --- categories endpoints ---
 	app.Get("/api/categories", func(c *fiber.Ctx) error {
-		rows, err := n.db.Query("SELECT id, name, parent_id, created_at, node_id FROM categories ORDER BY created_at DESC LIMIT 100")
+		rows, err := n.db.Query("SELECT id, name, parent_id, created_at, updated_at, node_id FROM categories ORDER BY created_at DESC LIMIT 100")
 		if err != nil {
 			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
 		}
@@ -368,12 +384,12 @@ func (n *Node) startHTTP() {
 		cats := []map[string]any{}
 		for rows.Next() {
 			var id, name string
-			var createdAt int64
+			var createdAt, updatedAt int64
 			var parentIDPtr, nodeIDPtr sql.NullString
-			rows.Scan(&id, &name, &parentIDPtr, &createdAt, &nodeIDPtr)
+			rows.Scan(&id, &name, &parentIDPtr, &createdAt, &updatedAt, &nodeIDPtr)
 			cats = append(cats, map[string]any{
 				"id": id, "name": name, "parent_id": parentIDPtr.String,
-				"created_at": createdAt, "node_id": nodeIDPtr.String,
+				"created_at": createdAt, "updated_at": updatedAt, "node_id": nodeIDPtr.String,
 			})
 		}
 		return c.JSON(cats)
@@ -397,15 +413,15 @@ func (n *Node) startHTTP() {
 			parentID = body.ParentID
 		}
 		_, err := n.db.Exec(
-			"INSERT INTO categories(id, name, parent_id, created_at, node_id) VALUES(?, ?, ?, ?, ?)",
-			idStr, body.Name, parentID, now, n.ID,
+			"INSERT INTO categories(id, name, parent_id, created_at, updated_at, node_id) VALUES(?, ?, ?, ?, ?, ?)",
+			idStr, body.Name, parentID, now, now, n.ID,
 		)
 		if err != nil {
 			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
 		}
 		return c.JSON(map[string]any{
 			"id": idStr, "name": body.Name, "parent_id": body.ParentID,
-			"created_at": now, "node_id": n.ID,
+			"created_at": now, "updated_at": now, "node_id": n.ID,
 		})
 	})
 
@@ -449,6 +465,13 @@ func (n *Node) applyChanges(changes []Change) int {
 				createdAt := toInt64(c.Row["created_at"])
 				updatedAt := toInt64(c.Row["updated_at"])
 				nodeID, _ := c.Row["node_id"].(string)
+				// Last-write-wins: skip if existing row is newer than incoming
+				var existingUpdatedAt int64
+				if err := tx.QueryRow("SELECT updated_at FROM items WHERE id = ?", id).Scan(&existingUpdatedAt); err == nil {
+					if existingUpdatedAt > updatedAt {
+						continue
+					}
+				}
 				_, err := tx.Exec(
 					"INSERT OR REPLACE INTO items(id, name, value, created_at, updated_at, node_id) VALUES(?, ?, ?, ?, ?, ?)",
 					id, name, value, createdAt, updatedAt, nodeID,
@@ -461,6 +484,16 @@ func (n *Node) applyChanges(changes []Change) int {
 			} else if c.Op == "DELETE" {
 				if c.OldID == "" {
 					continue
+				}
+				// Last-write-wins: skip delete if row was updated after deletion
+				if c.Row != nil {
+					deleteUpdatedAt := toInt64(c.Row["updated_at"])
+					var existingUpdatedAt int64
+					if err := tx.QueryRow("SELECT updated_at FROM items WHERE id = ?", c.OldID).Scan(&existingUpdatedAt); err == nil {
+						if existingUpdatedAt > deleteUpdatedAt {
+							continue
+						}
+					}
 				}
 				tx.Exec("DELETE FROM items WHERE id = ?", c.OldID)
 				applied++
@@ -475,7 +508,15 @@ func (n *Node) applyChanges(changes []Change) int {
 				name, _ := c.Row["name"].(string)
 				parentID, _ := c.Row["parent_id"].(string)
 				createdAt := toInt64(c.Row["created_at"])
+				updatedAt := toInt64(c.Row["updated_at"])
 				nodeID, _ := c.Row["node_id"].(string)
+				// Last-write-wins: skip if existing row is newer than incoming
+				var existingUpdatedAt int64
+				if err := tx.QueryRow("SELECT updated_at FROM categories WHERE id = ?", id).Scan(&existingUpdatedAt); err == nil {
+					if existingUpdatedAt > updatedAt {
+						continue
+					}
+				}
 				var pID interface{}
 				if parentID == "" {
 					pID = nil
@@ -483,8 +524,8 @@ func (n *Node) applyChanges(changes []Change) int {
 					pID = parentID
 				}
 				_, err := tx.Exec(
-					"INSERT OR REPLACE INTO categories(id, name, parent_id, created_at, node_id) VALUES(?, ?, ?, ?, ?)",
-					id, name, pID, createdAt, nodeID,
+					"INSERT OR REPLACE INTO categories(id, name, parent_id, created_at, updated_at, node_id) VALUES(?, ?, ?, ?, ?, ?)",
+					id, name, pID, createdAt, updatedAt, nodeID,
 				)
 				if err != nil {
 					log.Printf("[%s] apply categories error: %v", n.ID, err)
@@ -494,6 +535,16 @@ func (n *Node) applyChanges(changes []Change) int {
 			} else if c.Op == "DELETE" {
 				if c.OldID == "" {
 					continue
+				}
+				// Last-write-wins: skip delete if row was updated after deletion
+				if c.Row != nil {
+					deleteUpdatedAt := toInt64(c.Row["updated_at"])
+					var existingUpdatedAt int64
+					if err := tx.QueryRow("SELECT updated_at FROM categories WHERE id = ?", c.OldID).Scan(&existingUpdatedAt); err == nil {
+						if existingUpdatedAt > deleteUpdatedAt {
+							continue
+						}
+					}
 				}
 				tx.Exec("DELETE FROM categories WHERE id = ?", c.OldID)
 				applied++
