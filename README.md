@@ -175,41 +175,42 @@ See [PROTOCOL.md](PROTOCOL.md) for full spec. All implementations expose:
 
 All benchmarks run on Mac M4, 2 nodes on localhost, 50ms batch interval. Each runtime tested independently — same machine, same conditions, no cross-runtime traffic during testing.
 
-### Write Throughput (100 concurrent requests)
+### HTTP Benchmark (100 concurrent requests, 2 nodes same runtime)
 
 | Metric | Go (preupdate_hook + UUIDv7) | Node (triggers + UUIDv4) | Bun (triggers + UUIDv4) |
 |--------|----------------------------:|------------------------:|-----------------------:|
-| Write throughput | **10,272 QPS** | 7,090 QPS | 1,376 QPS |
-| Dual-node round-robin | 9,321 QPS | **19,568 QPS** | — |
-| Write latency p50 | **0.08ms** | 0.09ms | 0.10ms |
-| Read latency p50 | 0.23ms | 0.16ms | **0.15ms** |
-| Sync delay p50 | 51ms | 52ms | 52ms |
-| Integrity | 540 ✅ | 542 ✅ | 542 ✅ |
+| Write throughput | **7,678 QPS** | 1,717 QPS | 1,401 QPS |
+| Dual-node round-robin | 2,435 QPS | **17,517 QPS** | 14,360 QPS |
+| Write latency p50 | **0.08ms** | 0.11ms | 0.10ms |
+| Read latency p50 | 0.21ms | 0.16ms | **0.14ms** |
+| Sync delay p50 (A→B) | 51ms | 52ms | 52ms |
+| Sync delay p50 (B→A) | 51ms | 52ms | 52ms |
+| Integrity | 340 ✅ | 340 ✅ | 340 ✅ |
 
-Go leads single-node writes (zero-overhead hook). Node wins dual-node (hyper-express/uWebSockets handles concurrent connections better). Bun wins read latency. Sync delay identical across all (~50ms = batch interval).
+Go leads single-node writes (zero-overhead hook). Node and Bun win dual-node (uWebSockets/http.createServer handle concurrent connections better than Fiber's fasthttp under round-robin). Bun wins read latency. Sync delay identical across all (~50ms = batch interval).
 
-### Direct Go Benchmark (pure SQLite, no HTTP)
+### Direct SQLite Benchmark (10K writes, no HTTP, capture mechanism active)
 
-| Mode | Writes | QPS | Hooks fired |
-|------|-------:|----:|------------:|
-| Sequential | 10,000 | 36,932 | 10,000 ✅ |
-| Transaction | 10,000 | **379,404** | 10,000 ✅ |
+| Runtime | Mode | QPS | Capture | Hooks/Triggers fired |
+|---------|------|----:|---------|---------------------:|
+| Go | Sequential | 255,441 | preupdate_hook | 10,000 ✅ |
+| Go | Transaction | **373,457** | preupdate_hook | 10,000 ✅ |
+| Node | Sequential | 306,871 | triggers | 10,000 ✅ |
+| Node | Transaction | 354,159 | triggers | 10,000 ✅ |
+| Bun | Sequential | 339,064 | triggers | 10,000 ✅ |
+| Bun | Transaction | **394,475** | triggers | 10,000 ✅ |
 
-379K QPS confirms **zero overhead** from preupdate_hook — hook fires on every write with no measurable cost.
+Bun's bun:sqlite is fastest in raw SQLite — even with trigger overhead (1 extra INSERT per change), it beats Go's preupdate_hook (zero overhead) in transaction mode. Go's mattn/go-sqlite3 binding has more overhead per call. Node's better-sqlite3 sits between.
 
 ### UUIDv4 vs UUIDv7
 
 Each language uses the fastest UUID for its runtime:
 
-| Language | UUID | Why | DB QPS (100K transaction) |
-|----------|------|-----|--------------------------:|
-| Go | UUIDv7 | B-tree is bottleneck → sequential insert wins | 378,207 |
-| Bun | UUIDv4 | `crypto.randomUUID()` native C++ (31M gen QPS) → generation is bottleneck | 1,113,119 |
-| Node | UUIDv4 | `crypto.randomUUID()` native (Node 19+) → same as Bun | — |
-
-Go: UUIDv7 2.1x faster at 100K writes (B-tree page splits with random v4).
-Bun: UUIDv4 1.5x faster (native generation crushes JS UUIDv7 by 18x; bun:sqlite too fast for B-tree to matter).
-Node: UUIDv4 — same rationale as Bun, `crypto.randomUUID()` is native C++.
+| Language | UUID | Why |
+|----------|------|-----|
+| Go | UUIDv7 | B-tree is bottleneck → sequential insert wins, 2.1x faster at 100K writes |
+| Bun | UUIDv4 | `crypto.randomUUID()` native C++ (31M gen QPS) → generation is bottleneck, 1.5x faster than JS UUIDv7 |
+| Node | UUIDv4 | `crypto.randomUUID()` native (Node 19+) → same rationale as Bun |
 
 ### Batch Interval Optimization (Go)
 
@@ -226,8 +227,10 @@ Burst sync is constant ~20-25ms regardless of interval — batch threshold (100 
 | | Go | Node | Bun |
 |---|---|---|---|
 | Capture mechanism | preupdate_hook (zero overhead) | SQLite triggers (1 INSERT/change) | SQLite triggers (1 INSERT/change) |
-| Write throughput | 10,272 QPS | 7,090 QPS | 1,376 QPS |
-| Sync delay | ~52ms | ~52ms | ~52ms |
+| Write throughput (HTTP) | 7,678 QPS | 1,717 QPS | 1,401 QPS |
+| Direct SQLite (transaction) | 373,457 QPS | 354,159 QPS | **394,475 QPS** |
+| Dual-node round-robin | 2,435 QPS | **17,517 QPS** | 14,360 QPS |
+| Sync delay | ~51ms | ~52ms | ~52ms |
 | UUID | UUIDv7 (B-tree optimal) | UUIDv4 (native gen optimal) | UUIDv4 (native gen optimal) |
 | Conflict resolution | None needed (UUID PK) | None needed (UUID PK) | None needed (UUID PK) |
 | SQLite binding | mattn/go-sqlite3 | better-sqlite3 | bun:sqlite (built-in) |
