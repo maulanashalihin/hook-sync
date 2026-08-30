@@ -5,7 +5,7 @@
 // Usage: bun server.ts --id node1 --db node1.db --listen :9001 --peer http://localhost:9002 --batch-ms 50
 
 import { Database } from "bun:sqlite";
-import { createServer } from "http";
+
 
 // --- UUIDv7 (time-ordered, RFC 9562) ---
 function uuidv7(): string {
@@ -181,119 +181,75 @@ function applyChanges(changes: any[]): number {
 	return applied;
 }
 
-// --- HTTP server ---
-const server = createServer((req, res) => {
-	const url = new URL(req.url!, `http://${req.headers.host}`);
 
-	// POST /sync
-	if (req.method === "POST" && url.pathname === "/sync") {
-		let body = "";
-		req.on("data", (chunk) => (body += chunk));
-		req.on("end", () => {
-			try {
-				const changes = JSON.parse(body);
+// --- HTTP server (Bun.serve — native, not Node.js http.createServer) ---
+const server = Bun.serve({
+	port: parseInt(LISTEN.replace(":", "")),
+	fetch(req) {
+		const url = new URL(req.url);
+
+		// POST /sync
+		if (req.method === "POST" && url.pathname === "/sync") {
+			return req.json().then((changes: any[]) => {
 				const applied = applyChanges(changes);
-				res.writeHead(200, { "Content-Type": "application/json" });
-				res.end(JSON.stringify({ applied }));
-			} catch (e) {
-				res.writeHead(400, { "Content-Type": "application/json" });
-				res.end(JSON.stringify({ error: String(e) }));
-			}
-		});
-		return;
-	}
-
-	// GET /api/items
-	if (req.method === "GET" && url.pathname === "/api/items") {
-		const rows = db.prepare(
-			"SELECT id, name, value, created_at, updated_at, node_id FROM items ORDER BY created_at DESC LIMIT 100"
-		).all();
-		res.writeHead(200, { "Content-Type": "application/json" });
-		res.end(JSON.stringify(rows));
-		return;
-	}
-
-	// GET /api/items/:id
-	if (req.method === "GET" && url.pathname.startsWith("/api/items/")) {
-		const id = url.pathname.slice("/api/items/".length);
-		const row = db.prepare(
-			"SELECT id, name, value, created_at, updated_at, node_id FROM items WHERE id = ?"
-		).get(id);
-		if (row) {
-			res.writeHead(200, { "Content-Type": "application/json" });
-			res.end(JSON.stringify(row));
-		} else {
-			res.writeHead(404, { "Content-Type": "application/json" });
-			res.end(JSON.stringify({ error: "not found" }));
+				return Response.json({ applied });
+			}).catch((e) => Response.json({ error: String(e) }, { status: 400 }));
 		}
-		return;
-	}
 
-	// POST /api/items
-	if (req.method === "POST" && url.pathname === "/api/items") {
-		let body = "";
-		req.on("data", (chunk) => (body += chunk));
-		req.on("end", () => {
-			try {
-				const { name, value } = JSON.parse(body);
+		// GET /api/items
+		if (req.method === "GET" && url.pathname === "/api/items") {
+			const rows = db.prepare(
+				"SELECT id, name, value, created_at, updated_at, node_id FROM items ORDER BY created_at DESC LIMIT 100"
+			).all();
+			return Response.json(rows);
+		}
+
+		// GET /api/items/:id
+		if (req.method === "GET" && url.pathname.startsWith("/api/items/")) {
+			const id = url.pathname.slice("/api/items/".length);
+			const row = db.prepare(
+				"SELECT id, name, value, created_at, updated_at, node_id FROM items WHERE id = ?"
+			).get(id);
+			return row ? Response.json(row) : Response.json({ error: "not found" }, { status: 404 });
+		}
+
+		// POST /api/items
+		if (req.method === "POST" && url.pathname === "/api/items") {
+			return req.json().then((body: any) => {
 				const id = crypto.randomUUID();
 				const now = Date.now();
 				db.prepare(
 					"INSERT INTO items(id, name, value, created_at, updated_at, node_id) VALUES(?, ?, ?, ?, ?, ?)"
-				).run(id, name, value, now, now, ID);
-				res.writeHead(200, { "Content-Type": "application/json" });
-				res.end(JSON.stringify({ id, name, value, created_at: now, node_id: ID }));
-			} catch (e) {
-				res.writeHead(500, { "Content-Type": "application/json" });
-				res.end(JSON.stringify({ error: String(e) }));
-			}
-		});
-		return;
-	}
+				).run(id, body.name, body.value, now, now, ID);
+				return Response.json({ id, name: body.name, value: body.value, created_at: now, node_id: ID });
+			}).catch((e) => Response.json({ error: String(e) }, { status: 500 }));
+		}
 
-	// PUT /api/items/:id
-	if (req.method === "PUT" && url.pathname.startsWith("/api/items/")) {
-		const id = url.pathname.slice("/api/items/".length);
-		let body = "";
-		req.on("data", (chunk) => (body += chunk));
-		req.on("end", () => {
-			try {
-				const { name, value } = JSON.parse(body);
+		// PUT /api/items/:id
+		if (req.method === "PUT" && url.pathname.startsWith("/api/items/")) {
+			const id = url.pathname.slice("/api/items/".length);
+			return req.json().then((body: any) => {
 				const now = Date.now();
-				db.prepare(
-					"UPDATE items SET name = ?, value = ?, updated_at = ? WHERE id = ?"
-				).run(name, value, now, id);
-				res.writeHead(200, { "Content-Type": "application/json" });
-				res.end(JSON.stringify({ id, name, value, updated_at: now }));
-			} catch (e) {
-				res.writeHead(500, { "Content-Type": "application/json" });
-				res.end(JSON.stringify({ error: String(e) }));
-			}
-		});
-		return;
-	}
+				db.prepare("UPDATE items SET name = ?, value = ?, updated_at = ? WHERE id = ?").run(body.name, body.value, now, id);
+				return Response.json({ id, name: body.name, value: body.value, updated_at: now });
+			}).catch((e) => Response.json({ error: String(e) }, { status: 500 }));
+		}
 
-	// DELETE /api/items/:id
-	if (req.method === "DELETE" && url.pathname.startsWith("/api/items/")) {
-		const id = url.pathname.slice("/api/items/".length);
-		db.prepare("DELETE FROM items WHERE id = ?").run(id);
-		res.writeHead(200, { "Content-Type": "application/json" });
-		res.end(JSON.stringify({ deleted: id }));
-		return;
-	}
+		// DELETE /api/items/:id
+		if (req.method === "DELETE" && url.pathname.startsWith("/api/items/")) {
+			const id = url.pathname.slice("/api/items/".length);
+			db.prepare("DELETE FROM items WHERE id = ?").run(id);
+			return Response.json({ deleted: id });
+		}
 
-	// GET /health
-	if (req.method === "GET" && url.pathname === "/health") {
-		const { count } = db.prepare("SELECT COUNT(*) as count FROM items").get() as any;
-		res.writeHead(200, { "Content-Type": "application/json" });
-		res.end(JSON.stringify({ ok: true, node_id: ID, item_count: count }));
-		return;
-	}
+		// GET /health
+		if (req.method === "GET" && url.pathname === "/health") {
+			const { count } = db.prepare("SELECT COUNT(*) as count FROM items").get() as any;
+			return Response.json({ ok: true, node_id: ID, item_count: count });
+		}
 
-	res.writeHead(404, { "Content-Type": "application/json" });
-	res.end(JSON.stringify({ error: "not found" }));
+		return Response.json({ error: "not found" }, { status: 404 });
+	},
 });
 
-server.listen(parseInt(LISTEN.replace(":", "")), () => {
-	console.log(`[${ID}] listening on ${LISTEN}, peer=${PEER_URL}, batch=${BATCH_MS}ms`);
-});
+console.log(`[${ID}] listening on ${LISTEN}, peer=${PEER_URL}, batch=${BATCH_MS}ms`);
