@@ -116,8 +116,8 @@ setInterval(() => {
 	shipBatch(changes);
 }, BATCH_MS);
 
-// --- Apply received changes ---
-function applyChanges(changes) {
+// --- Apply received changes (transaction prevents local writes from interleaving) ---
+const applyChanges = db.transaction((changes) => {
 	db.prepare("UPDATE _meta SET value = 1 WHERE key = 'syncing'").run();
 	let applied = 0;
 	try {
@@ -142,7 +142,8 @@ function applyChanges(changes) {
 		db.prepare("UPDATE _meta SET value = 0 WHERE key = 'syncing'").run();
 	}
 	return applied;
-}
+});
+
 
 // --- HTTP server (hyper-express / uWebSockets) ---
 const app = new HyperExpress.Server();

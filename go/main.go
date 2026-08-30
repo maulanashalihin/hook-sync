@@ -197,7 +197,9 @@ func (n *Node) captureChange(d sqlite3.SQLitePreUpdateData) {
 	}
 }
 
+
 // batchShip collects changes and ships every batchInterval (default 50ms)
+// Drains channel completely before shipping to prevent changes being left behind
 func (n *Node) batchShip() {
 	batch := make([]Change, 0, 100)
 	ticker := time.NewTicker(n.batchInterval)
@@ -206,13 +208,32 @@ func (n *Node) batchShip() {
 	for {
 		select {
 		case c := <-n.changeCh:
-			log.Printf("[%s] BATCH received change, batch size=%d", n.ID, len(batch)+1)
 			batch = append(batch, c)
+			// Drain remaining changes from channel
+			drain := true
+			for drain {
+				select {
+				case c2 := <-n.changeCh:
+					batch = append(batch, c2)
+				default:
+					drain = false
+				}
+			}
 			if len(batch) >= 100 {
 				n.ship(batch)
 				batch = batch[:0]
 			}
 		case <-ticker.C:
+			// Drain all pending changes from channel
+			drain := true
+			for drain {
+				select {
+				case c := <-n.changeCh:
+					batch = append(batch, c)
+				default:
+					drain = false
+				}
+			}
 			if len(batch) > 0 {
 				n.ship(batch)
 				batch = batch[:0]
@@ -384,7 +405,10 @@ func (n *Node) startHTTP() {
 	go app.Listen(n.Listen)
 }
 
-// applyChanges applies received changes from peer
+
+// applyChanges applies received changes from peer in a single transaction.
+// Transaction holds the connection for the entire batch, preventing local writes
+// from interleaving while syncing flag is set (which would cause hook to drop changes).
 func (n *Node) applyChanges(changes []Change) int {
 	syncMu.Lock()
 	syncing = true
@@ -394,6 +418,13 @@ func (n *Node) applyChanges(changes []Change) int {
 		syncing = false
 		syncMu.Unlock()
 	}()
+
+	tx, err := n.db.Begin()
+	if err != nil {
+		log.Printf("[%s] begin tx error: %v", n.ID, err)
+		return 0
+	}
+	defer tx.Rollback()
 
 	applied := 0
 	for _, c := range changes {
@@ -407,13 +438,12 @@ func (n *Node) applyChanges(changes []Change) int {
 				continue
 			}
 			name, _ := c.Row["name"].(string)
-			// JSON unmarshal converts int64 to float64
 			value := toInt64(c.Row["value"])
 			createdAt := toInt64(c.Row["created_at"])
 			updatedAt := toInt64(c.Row["updated_at"])
 			nodeID, _ := c.Row["node_id"].(string)
 
-			_, err := n.db.Exec(
+			_, err := tx.Exec(
 				"INSERT OR REPLACE INTO items(id, name, value, created_at, updated_at, node_id) VALUES(?, ?, ?, ?, ?, ?)",
 				id, name, value, createdAt, updatedAt, nodeID,
 			)
@@ -427,13 +457,18 @@ func (n *Node) applyChanges(changes []Change) int {
 			if c.OldID == "" {
 				continue
 			}
-			_, err := n.db.Exec("DELETE FROM items WHERE id = ?", c.OldID)
+			_, err := tx.Exec("DELETE FROM items WHERE id = ?", c.OldID)
 			if err != nil {
 				log.Printf("[%s] delete error: %v", n.ID, err)
 				continue
 			}
 			applied++
 		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		log.Printf("[%s] commit error: %v", n.ID, err)
+		return 0
 	}
 	return applied
 }

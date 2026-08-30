@@ -123,8 +123,9 @@ setInterval(() => {
 	shipBatch(changes);
 }, BATCH_MS);
 
-// --- Apply received changes ---
-function applyChanges(changes: { op: string; row: { id: string; name: string; value: number; created_at: number; updated_at: number; node_id: string } | null; old_id: string | null }[]): number {
+
+// --- Apply received changes (transaction prevents local writes from interleaving) ---
+const applyChanges = db.transaction((changes: { op: string; row: { id: string; name: string; value: number; created_at: number; updated_at: number; node_id: string } | null; old_id: string | null }[]): number => {
 	stmtSyncOn.run();
 	let applied = 0;
 	try {
@@ -144,7 +145,7 @@ function applyChanges(changes: { op: string; row: { id: string; name: string; va
 		stmtSyncOff.run();
 	}
 	return applied;
-}
+});
 
 // --- HTTP server (Bun.serve native) ---
 const server = Bun.serve({
