@@ -163,7 +163,7 @@ See [PROTOCOL.md](PROTOCOL.md) for full spec. All implementations expose:
 - UUIDv7 primary keys (time-ordered, zero conflict) ✅
 - No infinite loop (syncing flag / trigger WHEN clause) ✅
 - Idle = zero traffic ✅
-- Sync does not block write path (single vs with-peer: 0-6% difference = noise) ✅
+- Sync does not block write path on real network (single vs dual server: -0.3% = noise) ✅
 
 ## Limitations (prototype)
 
@@ -177,7 +177,7 @@ See [PROTOCOL.md](PROTOCOL.md) for full spec. All implementations expose:
 
 ## Benchmark Results
 
-All benchmarks run on Mac M4, 2 nodes on localhost, 50ms batch interval. Each runtime tested independently — no cross-runtime traffic during testing.
+All benchmarks run on Mac M4. Localhost tests: 2 nodes on same machine, 0ms RTT. Real network test: 2 VPS (OVH + underconst), 4.5ms RTT between servers, 38-40ms RTT from Mac. Each runtime tested independently.
 
 Full report: [BENCHMARK-REPORT.md](BENCHMARK-REPORT.md)
 
@@ -218,6 +218,24 @@ Sync runs in the background. Write path = SQLite INSERT + capture only. Sync = s
 
 Burst sync is constant ~20-25ms regardless of interval — batch threshold (100 changes) triggers immediate ship.
 
+**Dual server: zero write penalty (2 VPS, real network, 5 runs, median):**
+
+| Metric | Single (OVH only) | Dual (OVH + underconst) | Difference |
+|--------|---:|---:|---:|
+| Write latency p50 | 35.21ms | 35.09ms | -0.3% (noise) |
+| Read latency p50 | 37.41ms | 37.27ms | -0.4% (noise) |
+| Write throughput | 1,168 QPS | 1,140 QPS | -2.4% (noise) |
+| Sync delay p50 (A→B) | — | 135ms | — |
+| Integrity | — | 750 = 750 ✅ | — |
+
+Setup: Node A (OVH 51.x.x.x) + Node B (underconst 185.x.x.x), Go + preupdate_hook, 50ms batch. RTT: Mac→OVH 38ms, Mac→underconst 40ms, OVH→underconst 4.5ms.
+
+**Dual server = replica gratis.** Write speed identical to single server. You pay sync delay (135ms), get a live replica on a second server. If node A goes down, node B has full data. Sync runs in background — does not enter write path.
+
+Sync delay breakdown: batch 50ms + Mac→OVH 38ms (write) + OVH→underconst 4.5ms (sync) + Mac→underconst 40ms (poll) ≈ 132ms. Tunable via `--batch-ms`.
+
+Real network benchmark variance: 1.12x (vs 10x on localhost). RTT dominates — HTTP server processing time is negligible compared to network latency.
+
 ### What is NOT reliable
 
 **HTTP throughput benchmark (localhost, 100-200 concurrent requests):**
@@ -234,10 +252,11 @@ This is a characteristic of localhost HTTP benchmarking with small request count
 
 ### What has NOT been tested
 
-- **2 real servers** — all benchmarks on localhost (0ms RTT). Real deployment adds 35-40ms+ RTT.
 - **Crash recovery** — changes in _changes table / in-memory channel are lost on crash before ship.
 - **Multi-table** — all benchmarks use single `items` table.
 - **High write volume sustained** — benchmarks use 100-200 request bursts, not sustained load.
+- **Read round-robin** — read from both nodes alternately for 2x read throughput. Not benchmarked.
+- **Bun/Node on real network** — real network test only done with Go. Bun/Node use triggers (1 extra INSERT/change), sync architecture same, but not verified on remote servers.
 
 ## Comparison
 
@@ -246,6 +265,8 @@ This is a characteristic of localhost HTTP benchmarking with small request count
 | Capture mechanism | preupdate_hook (zero overhead) | SQLite triggers (1 INSERT/change) | SQLite triggers (1 INSERT/change) |
 | Direct SQLite (transaction) | 373K QPS | 354K QPS | **394K QPS** |
 | Sync blocks writes? | No | No | No |
+| Sync blocks writes (real network)? | No (-0.3%) | Not tested | Not tested |
+| Real network sync delay | 135ms | Not tested | Not tested |
 | Sync delay | ~51ms | ~49ms | ~52ms |
 | UUID | UUIDv7 (B-tree optimal) | UUIDv4 (native gen optimal) | UUIDv4 (native gen optimal) |
 | Conflict resolution | None needed (UUID PK) | None needed (UUID PK) | None needed (UUID PK) |
