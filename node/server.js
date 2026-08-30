@@ -54,6 +54,15 @@ db.exec(`
 		row_id TEXT,
 		row_data TEXT
 	);
+
+	CREATE TABLE IF NOT EXISTS _dead_letter (
+		dead_id INTEGER PRIMARY KEY AUTOINCREMENT,
+		op TEXT,
+		row_id TEXT,
+		row_data TEXT,
+		failed_at INTEGER,
+		retry_count INTEGER DEFAULT 0
+	);
 `);
 
 // Triggers — only fire when not syncing
@@ -81,28 +90,49 @@ db.exec(`
 	END;
 `);
 
-// --- Batch ship ---
-async function shipBatch(changes) {
-	if (!PEER_URL || changes.length === 0) return;
+// --- Precompile statements ---
+const stmtInsert = db.prepare("INSERT INTO items(id, name, value, created_at, updated_at, node_id) VALUES(?, ?, ?, ?, ?, ?)");
+const stmtUpdate = db.prepare("UPDATE items SET name = ?, value = ?, updated_at = ? WHERE id = ?");
+const stmtDelete = db.prepare("DELETE FROM items WHERE id = ?");
+const stmtReplace = db.prepare("INSERT OR REPLACE INTO items(id, name, value, created_at, updated_at, node_id) VALUES(?, ?, ?, ?, ?, ?)");
+const stmtList = db.prepare("SELECT id, name, value, created_at, updated_at, node_id FROM items ORDER BY created_at DESC LIMIT 100");
+const stmtGet = db.prepare("SELECT id, name, value, created_at, updated_at, node_id FROM items WHERE id = ?");
+const stmtCount = db.prepare("SELECT COUNT(*) as count FROM items");
+const stmtChanges = db.prepare("SELECT change_id, op, row_id, row_data FROM _changes ORDER BY change_id LIMIT 100");
+const stmtDeleteChanges = db.prepare("DELETE FROM _changes WHERE change_id <= ?");
+const stmtSyncOn = db.prepare("UPDATE _meta SET value = 1 WHERE key = 'syncing'");
+const stmtSyncOff = db.prepare("UPDATE _meta SET value = 0 WHERE key = 'syncing'");
+const stmtDeadLetter = db.prepare("INSERT INTO _dead_letter(op, row_id, row_data, failed_at, retry_count) VALUES(?, ?, ?, ?, ?)");
+const stmtPendingChanges = db.prepare("SELECT COUNT(*) as count FROM _changes");
+const stmtDeadLetterCount = db.prepare("SELECT COUNT(*) as count FROM _dead_letter");
+
+// --- Batch ship (ACK-based: returns true only if peer confirms batch_id) ---
+async function shipBatch(batchId, changes) {
+	if (!PEER_URL || changes.length === 0) return true;
 	try {
 		const resp = await fetch(`${PEER_URL}/sync`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json", "X-Node-Id": ID },
-			body: JSON.stringify(changes),
+			body: JSON.stringify({ batch_id: batchId, changes }),
 		});
-		if (!resp.ok) {
-			console.error(`[${ID}] ship failed: ${resp.status}`);
-		}
-	} catch (e) {
-		console.error(`[${ID}] ship error:`, e.message);
+		if (!resp.ok) return false;
+		const body = await resp.json();
+		return body.ack === batchId;
+	} catch {
+		return false;
 	}
 }
 
-// Poll _changes table every BATCH_MS, ship, delete shipped
+const BACKOFF_MS = [50, 100, 200, 400, 800];
+let shipping = false;
+
+// Poll _changes every BATCH_MS — delete only after ACK confirms receipt
 setInterval(() => {
-	const rows = db.prepare("SELECT change_id, op, row_id, row_data FROM _changes ORDER BY change_id LIMIT 100").all();
+	if (shipping) return;
+	const rows = stmtChanges.all();
 	if (rows.length === 0) return;
 
+	const batchId = rows[rows.length - 1].change_id;
 	const changes = rows.map((r) => ({
 		op: r.op,
 		table: "items",
@@ -110,50 +140,63 @@ setInterval(() => {
 		old_id: r.op === "DELETE" ? r.row_id : null,
 	}));
 
-	const lastId = rows[rows.length - 1].change_id;
-	db.prepare("DELETE FROM _changes WHERE change_id <= ?").run(lastId);
-
-	shipBatch(changes);
+	shipping = true;
+	(async () => {
+		try {
+			for (let attempt = 0; attempt < BACKOFF_MS.length; attempt++) {
+				const ok = await shipBatch(batchId, changes);
+				if (ok) {
+					stmtDeleteChanges.run(batchId);
+					return;
+				}
+				if (attempt < BACKOFF_MS.length - 1) {
+					await new Promise((resolve) => setTimeout(resolve, BACKOFF_MS[attempt]));
+				}
+			}
+			// All retries exhausted → dead-letter the batch, then clear
+			const now = Date.now();
+			for (const r of rows) {
+				stmtDeadLetter.run(r.op, r.row_id, r.row_data, now, BACKOFF_MS.length);
+			}
+			stmtDeleteChanges.run(batchId);
+		} finally {
+			shipping = false;
+		}
+	})();
 }, BATCH_MS);
 
 // --- Apply received changes (transaction prevents local writes from interleaving) ---
 const applyChanges = db.transaction((changes) => {
-	db.prepare("UPDATE _meta SET value = 1 WHERE key = 'syncing'").run();
+	stmtSyncOn.run();
 	let applied = 0;
 	try {
-		const insertReplace = db.prepare(
-			"INSERT OR REPLACE INTO items(id, name, value, created_at, updated_at, node_id) VALUES(?, ?, ?, ?, ?, ?)"
-		);
-		const deleteStmt = db.prepare("DELETE FROM items WHERE id = ?");
-
 		for (const c of changes) {
 			if (c.op === "INSERT" || c.op === "UPDATE") {
 				if (!c.row) continue;
 				const r = c.row;
-				insertReplace.run(r.id, r.name, r.value, r.created_at, r.updated_at, r.node_id);
+				stmtReplace.run(r.id, r.name, r.value, r.created_at, r.updated_at, r.node_id);
 				applied++;
 			} else if (c.op === "DELETE") {
 				if (!c.old_id) continue;
-				deleteStmt.run(c.old_id);
+				stmtDelete.run(c.old_id);
 				applied++;
 			}
 		}
 	} finally {
-		db.prepare("UPDATE _meta SET value = 0 WHERE key = 'syncing'").run();
+		stmtSyncOff.run();
 	}
 	return applied;
 });
 
-
 // --- HTTP server (hyper-express / uWebSockets) ---
 const app = new HyperExpress.Server();
 
-// POST /sync
+// POST /sync — { batch_id, changes } → { applied, ack }
 app.post("/sync", async (req, res) => {
 	try {
-		const changes = await req.json();
-		const applied = applyChanges(changes);
-		res.json({ applied });
+		const body = await req.json();
+		const applied = applyChanges(body.changes);
+		res.json({ applied, ack: body.batch_id });
 	} catch (e) {
 		res.status(400).json({ error: e.message });
 	}
@@ -161,17 +204,12 @@ app.post("/sync", async (req, res) => {
 
 // GET /api/items
 app.get("/api/items", (req, res) => {
-	const rows = db.prepare(
-		"SELECT id, name, value, created_at, updated_at, node_id FROM items ORDER BY created_at DESC LIMIT 100"
-	).all();
-	res.json(rows);
+	res.json(stmtList.all());
 });
 
 // GET /api/items/:id
 app.get("/api/items/:id", (req, res) => {
-	const row = db.prepare(
-		"SELECT id, name, value, created_at, updated_at, node_id FROM items WHERE id = ?"
-	).get(req.params.id);
+	const row = stmtGet.get(req.params.id);
 	if (row) {
 		res.json(row);
 	} else {
@@ -183,11 +221,9 @@ app.get("/api/items/:id", (req, res) => {
 app.post("/api/items", async (req, res) => {
 	try {
 		const body = await req.json();
-		const id = crypto.randomUUID(); // UUIDv4 native (Node 19+)
+		const id = crypto.randomUUID();
 		const now = Date.now();
-		db.prepare(
-			"INSERT INTO items(id, name, value, created_at, updated_at, node_id) VALUES(?, ?, ?, ?, ?, ?)"
-		).run(id, body.name, body.value, now, now, ID);
+		stmtInsert.run(id, body.name, body.value, now, now, ID);
 		res.json({ id, name: body.name, value: body.value, created_at: now, node_id: ID });
 	} catch (e) {
 		res.status(500).json({ error: e.message });
@@ -199,9 +235,7 @@ app.put("/api/items/:id", async (req, res) => {
 	try {
 		const body = await req.json();
 		const now = Date.now();
-		db.prepare("UPDATE items SET name = ?, value = ?, updated_at = ? WHERE id = ?").run(
-			body.name, body.value, now, req.params.id
-		);
+		stmtUpdate.run(body.name, body.value, now, req.params.id);
 		res.json({ id: req.params.id, name: body.name, value: body.value, updated_at: now });
 	} catch (e) {
 		res.status(500).json({ error: e.message });
@@ -210,14 +244,16 @@ app.put("/api/items/:id", async (req, res) => {
 
 // DELETE /api/items/:id
 app.delete("/api/items/:id", (req, res) => {
-	db.prepare("DELETE FROM items WHERE id = ?").run(req.params.id);
+	stmtDelete.run(req.params.id);
 	res.json({ deleted: req.params.id });
 });
 
 // GET /health
 app.get("/health", (req, res) => {
-	const { count } = db.prepare("SELECT COUNT(*) as count FROM items").get();
-	res.json({ ok: true, node_id: ID, item_count: count });
+	const { count } = stmtCount.get();
+	const { count: pendingChanges } = stmtPendingChanges.get();
+	const { count: deadLetter } = stmtDeadLetterCount.get();
+	res.json({ ok: true, node_id: ID, item_count: count, pending_changes: pendingChanges, dead_letter: deadLetter });
 });
 
 app.listen(parseInt(LISTEN.replace(":", "")))

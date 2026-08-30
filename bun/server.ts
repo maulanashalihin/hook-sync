@@ -52,6 +52,14 @@ db.exec(`
 		row_id TEXT,
 		row_data TEXT
 	);
+	CREATE TABLE IF NOT EXISTS _dead_letter (
+		dead_id INTEGER PRIMARY KEY AUTOINCREMENT,
+		op TEXT,
+		row_id TEXT,
+		row_data TEXT,
+		failed_at INTEGER,
+		retry_count INTEGER DEFAULT 0
+	);
 `);
 
 // Triggers — only fire when not syncing
@@ -91,27 +99,38 @@ const stmtChanges = db.prepare("SELECT change_id, op, row_id, row_data FROM _cha
 const stmtDeleteChanges = db.prepare("DELETE FROM _changes WHERE change_id <= ?");
 const stmtSyncOn = db.prepare("UPDATE _meta SET value = 1 WHERE key = 'syncing'");
 const stmtSyncOff = db.prepare("UPDATE _meta SET value = 0 WHERE key = 'syncing'");
+const stmtDeadLetter = db.prepare("INSERT INTO _dead_letter(op, row_id, row_data, failed_at, retry_count) VALUES(?, ?, ?, ?, ?)");
+const stmtRetryCount = db.prepare("UPDATE _dead_letter SET retry_count = ? WHERE dead_id = ?");
+const stmtPendingChanges = db.prepare("SELECT COUNT(*) as count FROM _changes");
+const stmtDeadLetterCount = db.prepare("SELECT COUNT(*) as count FROM _dead_letter");
 
-// --- Batch ship ---
-async function shipBatch(changes: unknown[]) {
-	if (!PEER_URL || changes.length === 0) return;
+// --- Batch ship (ACK-based: returns true only if peer confirms batch_id) ---
+async function shipBatch(batchId: number, changes: unknown[]): Promise<boolean> {
+	if (!PEER_URL || changes.length === 0) return true;
 	try {
 		const resp = await fetch(`${PEER_URL}/sync`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json", "X-Node-Id": ID },
-			body: JSON.stringify(changes),
+			body: JSON.stringify({ batch_id: batchId, changes }),
 		});
-		if (!resp.ok) console.error(`[${ID}] ship failed: ${resp.status}`);
-	} catch (e) {
-		console.error(`[${ID}] ship error:`, e);
+		if (!resp.ok) return false;
+		const body = (await resp.json()) as { applied: number; ack: number };
+		return body.ack === batchId;
+	} catch {
+		return false;
 	}
 }
 
-// Poll _changes every BATCH_MS
+const BACKOFF_MS = [50, 100, 200, 400, 800];
+let shipping = false;
+
+// Poll _changes every BATCH_MS — delete only after ACK confirms receipt
 setInterval(() => {
+	if (shipping) return;
 	const rows = stmtChanges.all() as { change_id: number; op: string; row_id: string; row_data: string | null }[];
 	if (rows.length === 0) return;
 
+	const batchId = rows[rows.length - 1].change_id;
 	const changes = rows.map((r) => ({
 		op: r.op,
 		table: "items",
@@ -119,8 +138,31 @@ setInterval(() => {
 		old_id: r.op === "DELETE" ? r.row_id : null,
 	}));
 
-	stmtDeleteChanges.run(rows[rows.length - 1].change_id);
-	shipBatch(changes);
+	shipping = true;
+	(async () => {
+		try {
+			for (let attempt = 0; attempt < BACKOFF_MS.length; attempt++) {
+				const ok = await shipBatch(batchId, changes);
+				if (ok) {
+					stmtDeleteChanges.run(batchId);
+					return;
+				}
+				if (attempt < BACKOFF_MS.length - 1) {
+					const { promise, resolve } = Promise.withResolvers<void>();
+					setTimeout(resolve, BACKOFF_MS[attempt]);
+					await promise;
+				}
+			}
+			// All retries exhausted → dead-letter the batch, then clear
+			const now = Date.now();
+			for (const r of rows) {
+				stmtDeadLetter.run(r.op, r.row_id, r.row_data, now, BACKOFF_MS.length);
+			}
+			stmtDeleteChanges.run(batchId);
+		} finally {
+			shipping = false;
+		}
+	})();
 }, BATCH_MS);
 
 
@@ -155,11 +197,11 @@ const server = Bun.serve({
 		const method = req.method;
 		const path = url.pathname;
 
-		// POST /sync
+		// POST /sync — { batch_id, changes } → { applied, ack }
 		if (method === "POST" && path === "/sync") {
-			return req.json().then((changes: Parameters<typeof applyChanges>[0]) => {
-				const applied = applyChanges(changes);
-				return Response.json({ applied });
+			return req.json().then((body: { batch_id: number; changes: Parameters<typeof applyChanges>[0] }) => {
+				const applied = applyChanges(body.changes);
+				return Response.json({ applied, ack: body.batch_id });
 			}).catch((e: unknown) => Response.json({ error: String(e) }, { status: 400 }));
 		}
 
@@ -205,7 +247,9 @@ const server = Bun.serve({
 		// GET /health
 		if (method === "GET" && path === "/health") {
 			const { count } = stmtCount.get() as { count: number };
-			return Response.json({ ok: true, node_id: ID, item_count: count });
+			const { count: pendingChanges } = stmtPendingChanges.get() as { count: number };
+			const { count: deadLetter } = stmtDeadLetterCount.get() as { count: number };
+			return Response.json({ ok: true, node_id: ID, item_count: count, pending_changes: pendingChanges, dead_letter: deadLetter });
 		}
 
 		return Response.json({ error: "not found" }, { status: 404 });
