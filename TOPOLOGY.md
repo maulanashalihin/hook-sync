@@ -100,6 +100,31 @@ US hub and EU hub in full mesh (2 peers each). Edge nodes peer to regional hub o
 2. **Relay mode** — enables star for 8+ nodes. Hub forwards received changes to other peers. Medium complexity.
 3. **Watermark-based pull** — nodes ask "give me changes after X" instead of push. For unreliable networks / eventual consistency at scale. Highest complexity, defer until needed.
 
+## Open Problems (Not Yet Solved)
+
+### _changes table management with multiple peers
+
+Current ACK protocol assumes 1 peer: ship → ACK → delete. With N peers in full mesh, when do we delete from `_changes`?
+
+- **Delete after all ACK:** 1 peer down → `_changes` piles up for everyone
+- **Delete after first ACK:** other peers miss the change → data loss for them
+- **Watermark per peer (proposed):** track `last_acked` per peer in `_peer_state` table. Delete only changes that ALL peers have ACKed. Changes for offline peers stay until they reconnect.
+
+```sql
+CREATE TABLE _peer_state (
+    peer_url TEXT PRIMARY KEY,
+    last_acked INTEGER DEFAULT 0
+);
+```
+
+Not yet implemented. Needs to be built together with multi-peer support.
+
+### Relay mode: duplicate forwarding
+
+In star topology, hub forwards received changes to other edges. If edge1 and edge2 both write, hub receives both, forwards both. But if hub also has full mesh with another hub, same change can loop. Need a "seen" set or origin tracking to prevent forwarding changes back to the node they came from.
+
+Not yet designed.
+
 ## What NOT to Do
 
 - **Don't build topology management into the protocol.** Keep protocol simple (ship changes, ACK). Topology is a node-config concern.
