@@ -28,7 +28,7 @@ Tested and verified: 4-node all-to-all, all 3 runtimes, cross-runtime mesh (Go+B
 
 ### Dedicated hub / star (8+ nodes)
 
-Dedicated hub relays changes between edges. Hub is **Go-only** (Pebble KV store — write-optimized LSM, no SQLite, no triggers). Edges use existing `server-mesh.*` scripts with `--peer` pointing to hub. Hub ACKs immediately, forwards asynchronously. Durable forwarding queue in Pebble survives hub crash.
+Dedicated hub is a **protocol-level relay** — speaks only HTTP + JSON, language-agnostic. Edges can be any language (Go, Bun, Node, Python, Rust) that implements the [wire protocol](PROTOCOL.md). Hub itself is Go-only (Pebble KV store — write-optimized LSM, no SQLite, no triggers). Edges use existing `server-mesh.*` scripts with `--peer` pointing to hub. Hub ACKs immediately, forwards asynchronously. Durable forwarding queue in Pebble survives hub crash.
 
 ```
   edge1 ──POST /sync──→ hub ──POST /sync──→ edge2

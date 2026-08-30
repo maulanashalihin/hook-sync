@@ -89,7 +89,7 @@ edge1 ──→ hub ──→ edge2
 edge3 ──→ hub ──→ edge4
 ```
 
-Go-only hub with Pebble KV (LSM tree, write-optimized). No SQLite, no triggers — pure relay + backup. Hub ACKs immediately, forwards asynchronously. Durable forwarding queue survives hub crash. Edges use existing mesh scripts — hub is just a peer.
+Hub is a **protocol-level relay** — speaks only HTTP + JSON, language-agnostic. Edges can be Go, Bun, Node, Python, Rust, any language that implements the [wire protocol](PROTOCOL.md). Hub itself is Go-only (Pebble KV, LSM tree, write-optimized). No SQLite, no triggers — pure relay + backup. Hub ACKs immediately, forwards asynchronously. Durable forwarding queue survives hub crash. Edges use existing mesh scripts — hub is just a peer.
 See [TOPOLOGY.md](TOPOLOGY.md) for scaling formulas, hub design details, and multi-region setup.
 
 ### Multi-region (hub-to-hub)
