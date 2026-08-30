@@ -18,8 +18,11 @@ Tested and verified across all runtime pairs (Go, Bun, Node).
 
 ```
     A ←→ B
-    ↕     ↕
+    ↕ ╳ ↕
     C ←→ D
+
+A connects to B, C, D. B connects to A, C, D. Etc.
+6 connections for 4 nodes. Every node talks to every other directly.
 ```
 
 No multi-hop. No relay. No hub. Each change goes directly from writer to all other nodes in 1 hop.
