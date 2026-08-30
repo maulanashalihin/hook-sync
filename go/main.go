@@ -70,6 +70,7 @@ func main() {
 		Listen:        *listen,
 		batchSize:     *batchSize,
 		batchInterval: time.Duration(*batchMs) * time.Millisecond,
+		PeerURL:       *peerURL,
 		noTrigger:     *noTrigger,
 	}
 

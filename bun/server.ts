@@ -250,6 +250,21 @@ const server = Bun.serve({
 			}).catch((e: unknown) => Response.json({ error: String(e) }, { status: 500 }));
 		}
 
+		// POST /api/items/batch — create multiple items in one transaction
+		if (method === "POST" && path === "/api/items/batch") {
+			return req.json().then((items: { name: string; value: number }[]) => {
+				const now = Date.now();
+				const tx = db.transaction(() => {
+					for (const item of items) {
+						const id = crypto.randomUUID();
+						stmtInsert.run(id, item.name, item.value, now, now, ID);
+					}
+				});
+				tx();
+				return Response.json({ created: items.length });
+			}).catch((e: unknown) => Response.json({ error: String(e) }, { status: 500 }));
+		}
+
 		// PUT /api/items/:id
 		if (method === "PUT" && path.startsWith("/api/items/")) {
 			const id = path.slice("/api/items/".length);

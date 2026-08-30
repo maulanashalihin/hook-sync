@@ -212,7 +212,7 @@ const applyChanges = db.transaction((changes) => {
 });
 
 // --- HTTP server (hyper-express / uWebSockets) ---
-const app = new HyperExpress.Server();
+const app = new HyperExpress.Server({ max_body_length: 100 * 1024 * 1024 });
 
 // POST /sync — { batch_id, changes } → { applied, ack }
 app.post("/sync", async (req, res) => {
@@ -248,6 +248,24 @@ app.post("/api/items", async (req, res) => {
 		const now = Date.now();
 		stmtInsert.run(id, body.name, body.value, now, now, ID);
 		res.json({ id, name: body.name, value: body.value, created_at: now, node_id: ID });
+	} catch (e) {
+		res.status(500).json({ error: e.message });
+	}
+});
+
+// POST /api/items/batch — create multiple items in one transaction
+app.post("/api/items/batch", async (req, res) => {
+	try {
+		const items = await req.json();
+		const now = Date.now();
+		const tx = db.transaction(() => {
+			for (const item of items) {
+				const id = crypto.randomUUID();
+				stmtInsert.run(id, item.name, item.value, now, now, ID);
+			}
+		});
+		tx();
+		res.json({ created: items.length });
 	} catch (e) {
 		res.status(500).json({ error: e.message });
 	}

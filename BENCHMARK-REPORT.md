@@ -102,6 +102,38 @@ After fix: `-batch-size 10000` + drain mode (ships until `_changes` empty within
 
 Drain mode: ship loop runs until `_changes` is empty within each tick, not just one batch. Combined with batch-size 10000, all pending changes ship in 1-2 ticks.
 
+
+## Volume Stress Test (massive writes, all 3 runtimes)
+
+Writes 10K, 100K, and 500K items via batch endpoint to node A, then verifies:
+1. **Convergence time** — how long until node B has all items
+2. **Consistency** — exact item count match, 0 pending, 0 dead letter
+3. **Persistence** — kill both nodes, restart, verify data survives in SQLite file
+
+| Volume | Runtime | Write time | Converge time | Consistency | Persistence |
+|-------:|---------|-----------:|--------------:|:-----------:|:-----------:|
+| 10K | Go | 96ms | 1s | ✅ PASS | ✅ PASS |
+| 10K | Bun | 58ms | 1s | ✅ PASS | ✅ PASS |
+| 10K | Node | 50ms | 1s | ✅ PASS | ✅ PASS |
+| 100K | Go | 891ms | 1s | ✅ PASS | ✅ PASS |
+| 100K | Bun | 769ms | 1s | ✅ PASS | ✅ PASS |
+| 100K | Node | 618ms | 1s | ✅ PASS | ✅ PASS |
+| 500K | Go | 4.2s | 5s | ✅ PASS | ✅ PASS |
+| 500K | Bun | 10.7s | 5s | ✅ PASS | ✅ PASS |
+| 500K | Node | 10.2s | 7s | ✅ PASS | ✅ PASS |
+
+**9/9 PASS.** All 3 runtimes, all volume levels.
+
+Key findings:
+- **10K and 100K converge in 1s** across all runtimes — batch-size 10000 + drain mode ships all changes in 1-2 ticks
+- **500K converges in 5-7s** — Go fastest (5s), Bun and Node similar (5-7s)
+- **Go writes 500K in 4.2s** — 2.5x faster than Bun (10.7s) and Node (10.2s) at high volume
+- **Bun and Node fastest at low volume** (10K: 58ms/50ms vs Go 96ms) — less HTTP overhead per request
+- **Zero data loss** — all persistence tests pass, SQLite WAL ensures durability across kill+restart
+- **Zero dead letters** — no ACK mismatches under load
+
+Run with: `bash bench-stress.sh` (all runtimes) or `bash bench-stress.sh go` (single runtime)
+
 ---
 
 ## Split-Brain Safety (all 3 runtimes)
@@ -310,3 +342,4 @@ Batch 10,000:
 - `bench-hub.sh` — Dedicated hub benchmark, 1 Go hub + 3 edges (all 3 runtimes)
 - `bench-splitbrain.sh` — Split-brain safety test, partition + conflict + reconnect (all 3 runtimes)
 - `bench-trigger.sh` — Trigger overhead test via HTTP (baseline vs with triggers, Go)
+- `bench-stress.sh` — Volume stress test, 10K/100K/500K items (convergence + persistence + consistency, all 3 runtimes)
