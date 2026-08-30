@@ -76,23 +76,6 @@ Burst sync is constant ~20-25ms regardless of interval — batch threshold (100 
 
 ---
 
-## Real Network (2 VPS, Go)
-
-2 VPS (OVH + underconst), 4.5ms RTT between servers, 38-40ms RTT from Mac. 5 runs, median.
-
-| Metric | Single server | Dual server | Difference |
-|--------|--------:|--------:|--------:|
-| Write latency p50 | 35.21ms | 35.09ms | -0.3% (noise) |
-| Read latency p50 | 37.41ms | 37.27ms | -0.4% (noise) |
-| Write throughput | 1,168 QPS | 1,140 QPS | -2.4% (noise) |
-| Sync delay p50 (A→B) | — | 135ms | — |
-| Integrity | — | 750 = 750 ✅ | — |
-
-**Dual server = replica gratis.** Write speed identical to single server. Pay sync delay (135ms), get live replica. Real network variance: 1.12x (vs 10x on localhost) — RTT dominates, stabilizes benchmark.
-
-Sync delay breakdown: batch 50ms + Mac→VPS-A 38ms (write) + VPS-A→VPS-B 4.5ms (sync) + Mac→VPS-B 40ms (poll) ≈ 132ms.
-
----
 
 ## Full Mesh Throughput (4 nodes all-to-all)
 
