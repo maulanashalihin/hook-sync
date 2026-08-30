@@ -191,34 +191,50 @@ Postgres default durability (unfair):
   Postgres  (synchronous_commit=on, replica):   4416, 4263, 4719, 4148, 4187, 4334, 4431, 4515, 4377, 4005
 ```
 
-### Batch mode: HTTP overhead bypass (1 request = 100 writes)
+### Batch mode: HTTP overhead bypass
 
-Same servers, same durability settings. Batch endpoint: 1 HTTP request contains 100 items, inserted in single transaction. 10 runs × 100 batch-requests × 100 writes = 100K writes/run.
+Same servers, same durability settings. Batch endpoint: 1 HTTP request contains N items, inserted in single transaction. 10 runs per batch size, 100K writes/run, concurrency 10.
 
-| System | QPS median | QPS min | QPS max | vs single-write |
-|--------|--------:|--------:|--------:|:----------------:|
-| hook-sync (SQLite) | **27,366** | 25,095 | 30,604 | 4.5x faster |
-| Postgres | 22,703 | 21,448 | 27,302 | 3.6x faster |
+| Batch size | hook-sync (SQLite) | Postgres | SQLite advantage |
+|-----------|--------:|--------:|--------:|
+| 1 (single) | 6,065 QPS | 6,238 QPS | tie (HTTP dominates) |
+| 100 | 27,366 QPS | 22,703 QPS | +20.5% |
+| 1,000 | 31,429 QPS | 23,682 QPS | +32.7% |
+| 10,000 | 31,558 QPS | 8,278 QPS | **+3.8x** |
 
-**hook-sync +20.5% faster than Postgres** in batch mode. SQLite advantage appears when HTTP overhead is distributed across multiple writes per request.
+**hook-sync plateaus at ~31K QPS** (batch 1,000 and 10,000 identical). That's the HTTP server + JSON parsing ceiling — not SQLite. SQLite raw is 394K QPS, still far above.
 
-Why: in single-write mode, HTTP overhead (~0.16ms/req) dominates — DB write time is negligible. In batch mode, HTTP overhead is amortized across 100 writes, so DB write time becomes significant. SQLite transaction = 100 INSERTs in 1 WAL flush, lighter per-query overhead than Postgres (no query planner, no MVCC visibility check, no connection pool round-trip per Exec).
+**Postgres degrades at batch 10,000** — drops from 23,682 to 8,278 QPS (-65%). Single transaction with 10,000 INSERTs is too large: WAL buffer fills, lock contention, MVCC overhead. Postgres optimal at batch 100-1,000, degrades after.
 
-```
-Batch mode QPS:
-  hook-sync:  30604, 25765, 25870, 26166, 29858, 30093, 25095, 27366, 30483, 27106
-  Postgres:   21448, 22124, 25084, 24103, 22210, 22326, 22703, 22588, 26814, 27302
-```
+Why SQLite wins more as batch grows: SQLite transaction = N INSERTs in 1 WAL flush, lightweight per-query (no query planner, no MVCC visibility check, no connection pool round-trip per Exec). Postgres has heavier per-query overhead that compounds in large transactions.
 
 ### Scaling: single vs batch vs direct
 
 | Mode | hook-sync | Postgres | SQLite advantage |
 |------|--------:|--------:|--------:|
 | Direct (no HTTP) | 394K QPS | ~12K TPS | 33x |
-| Batch (1 req = 100 writes) | 27,366 QPS | 22,703 QPS | +20.5% |
-| Single (1 req = 1 write) | 6,065 QPS | 6,238 QPS | tie (HTTP dominates) |
+| Batch 10,000 (1 req) | 31,558 QPS | 8,278 QPS | 3.8x |
+| Batch 1,000 (1 req) | 31,429 QPS | 23,682 QPS | +32.7% |
+| Batch 100 (1 req) | 27,366 QPS | 22,703 QPS | +20.5% |
+| Single (1 req = 1 write) | 6,065 QPS | 6,238 QPS | tie |
 
-As HTTP overhead decreases (batch), SQLite advantage increases. Direct SQLite is 33x faster than Postgres — the gap is hidden by HTTP overhead in single-write mode.
+As HTTP overhead decreases (larger batch), SQLite advantage increases. Direct SQLite is 33x faster than Postgres — the gap is hidden by HTTP overhead in single-write mode.
+
+### All QPS data
+
+```
+Batch 100:
+  hook-sync:  30604, 25765, 25870, 26166, 29858, 30093, 25095, 27366, 30483, 27106
+  Postgres:   21448, 22124, 25084, 24103, 22210, 22326, 22703, 22588, 26814, 27302
+
+Batch 1,000:
+  hook-sync:  31065, 34427, 34727, 31111, 31429, 32775, 31693, 31030, 31427, 29124
+  Postgres:   23361, 28353, 27320, 27661, 21813, 22207, 23682, 22377, 22064, 23872
+
+Batch 10,000:
+  hook-sync:  30379, 33514, 31310, 33983, 33634, 34478, 30618, 31558, 29089, 30521
+  Postgres:   7912, 8324, 8067, 8272, 8179, 8424, 8646, 8408, 7976, 8278
+```
 
 ---
 
