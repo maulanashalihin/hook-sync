@@ -1,6 +1,6 @@
 # hook-sync
 
-Multi-language SQLite replication. Change capture via SQLite triggers + `_changes` table, ACK-based batched HTTP sync, UUID primary keys. Go, Bun, and Node implementations speak the same wire protocol and sync to each other. Supports point-to-point (2 nodes), full mesh (3-7 nodes), and dedicated hub / star (8+ nodes) topologies.
+Multi-language SQLite replication. Change capture via SQLite triggers + `_changes` table, ACK-based batched HTTP sync, UUID primary keys. Go, Bun, and Node implementations speak the same wire protocol and sync to each other. Supports point-to-point (2 nodes), full mesh (3-7 nodes), and dedicated hub / star (8+ nodes) topologies. Cross-server benchmark: 3.8x faster than Postgres at batch 10K, 100K items converge in 2s with zero data loss.
 
 ## How It Works
 
@@ -8,6 +8,7 @@ Multi-language SQLite replication. Change capture via SQLite triggers + `_change
 App write (native SQLite speed)
   → Trigger captures change to _changes table (same transaction)
   → Background timer: batch every 50ms (default)
+  → Drain mode: ships until _changes is empty within each tick
   → HTTP POST {batch_id, changes} to peer
   → Peer: INSERT OR REPLACE (UUID PK = zero conflict)
   → Peer returns {applied, ack: batch_id}
@@ -84,7 +85,7 @@ All implementations use the same capture mechanism (triggers + `_changes` table)
 cd go
 go build -o ../hook-sync-go .
 
-./hook-sync-go -id node1 -db node1.db -listen :9001 -peer http://localhost:9002 -batch-ms 50
+./hook-sync-go -id node1 -db node1.db -listen :9001 -peer http://localhost:9002 -batch-ms 50 -batch-size 10000
 ```
 
 ### Bun
@@ -178,6 +179,7 @@ See [PROTOCOL.md](PROTOCOL.md) for full spec.
 | `GET` | `/api/items/:id` | Get single item |
 | `PUT` | `/api/items/:id` | Update item |
 | `DELETE` | `/api/items/:id` | Delete item |
+| `POST` | `/api/items/batch` | Create multiple items in one transaction (batch write) |
 | `POST` | `/sync` | Receive change batch with ACK (internal) |
 | `GET` | `/health` | Health + item count + pending changes + dead letter count + per-peer watermarks (mesh) |
 
@@ -260,6 +262,30 @@ Tested: kill node mid-write → changes survive in `_changes` table → restart 
 
 Tested: peer unreachable → 5 retries with backoff → changes moved to `_dead_letter` → pending cleared. PASS.
 
+### Cross-server vs Postgres (100K writes, real network, fair durability)
+
+2 VPS (OVH Canada + 1TIM Asia, ~2-4ms RTT). Same Go HTTP client, concurrency 10. Both with active replication. Both fast durability (SQLite `synchronous=NORMAL` vs Postgres `synchronous_commit=off`).
+
+| Mode | hook-sync (SQLite) | Postgres | Advantage |
+|------|--------:|--------:|--------:|
+| Single write (1 req = 1 INSERT) | 6,065 QPS | 6,238 QPS | tie (HTTP dominates) |
+| Batch 100 (1 req = 100 INSERTs) | 27,366 QPS | 22,703 QPS | **hook-sync +20.5%** |
+| Batch 1,000 | 31,429 QPS | 23,682 QPS | **hook-sync +32.7%** |
+| Batch 10,000 | 31,558 QPS | 8,278 QPS | **hook-sync 3.8x** |
+
+At equal durability, raw write throughput is tied in single-write mode (HTTP overhead dominates). As batch size grows, SQLite advantage emerges — hook-sync plateaus at ~31K QPS (HTTP ceiling), Postgres degrades at batch 10K (WAL buffer contention).
+
+| Metric | hook-sync | Postgres |
+|--------|----------|----------|
+| Sync overhead | ~0% (background goroutine) | WAL sender overhead |
+| Replica converge (100K items) | 2s (batch 10K + drain mode) | 3s (WAL streaming) |
+| Multi-writer | Yes (UUID PK, idempotent) | No (primary-only) |
+| Cross-runtime | Go, Bun, Node | Go-only |
+| Topology | Point-to-point, full mesh, hub | Primary-replica only |
+| Operational complexity | Single binary + SQLite file | Postgres cluster + replication config |
+
+Full report: [BENCHMARK-REPORT.md](BENCHMARK-REPORT.md)
+
 ## Verified
 
 - Go ↔ Go, Go ↔ Bun, Go ↔ Node, Bun ↔ Node bidirectional sync ✅
@@ -276,6 +302,10 @@ Tested: peer unreachable → 5 retries with backoff → changes moved to `_dead_
 - Dedicated hub (Pebble KV): Go hub + 3 Go edges, star topology, multi-writer converge ✅
 - Hub crash recovery: kill hub mid-traffic → Pebble fwd queue survives → restart → all edges converge ✅
 - Cross-runtime star: Go hub + Go/Bun/Node edges, all converge, 0 pending, 0 dead letter ✅
+- Cross-server vs Postgres: 100K writes, OVH Canada + 1TIM Asia, fair durability, 3.8x faster at batch 10K ✅
+- Batch scaling: hook-sync plateaus at 31K QPS, Postgres degrades at batch 10K ✅
+- Convergence: 100K items in 2s (batch-size 10000 + drain mode), zero data loss ✅
+- Sync overhead: ~0% (with peer vs without peer = noise) ✅
 
 ## Limitations
 
