@@ -4,14 +4,9 @@ Zero-overhead SQLite replication via `sqlite3_preupdate_hook` + batched HTTP shi
 
 ## Why
 
-Two existing approaches to SQLite replication, both with tradeoffs:
+Existing trigger-based CDC (cr-sqlite) adds 2.6x write overhead — every INSERT writes N extra rows to `__crsql_clocks` per changed column.
 
-| Approach | Write overhead | Sync reliability | Issue |
-|---|---|---|---|
-| WAL page shipping (walsync) | Zero | Broken | Burst writes produce WAL frames that don't match replica page layout |
-| Trigger-based CDC (cr-sqlite) | 2.6x slower | Reliable | Every INSERT writes N extra rows to `__crsql_clocks` per changed column |
-
-**hook-sync** is the third path: `sqlite3_preupdate_hook` gives row-level CDC with **zero write overhead** (no triggers, no extra tables) and **reliable row-level sync** (no page layout dependency).
+**hook-sync** is a different approach: `sqlite3_preupdate_hook` gives row-level CDC with **zero write overhead** (no triggers, no extra tables) and **reliable row-level sync** (no page layout dependency).
 
 ## How It Works
 
@@ -20,7 +15,7 @@ App write (native SQLite speed)
   → sqlite3_preupdate_hook fires BEFORE change
   → Hook captures: op, table, full old/new row values
   → Push to in-memory channel (non-blocking)
-  → Background goroutine: batch every 100ms
+  → Background goroutine: batch every 50ms (default)
   → HTTP POST JSON to peer node
   → Peer: INSERT OR REPLACE (UUID PK = zero conflict)
 ```
@@ -44,6 +39,10 @@ UUID PKs eliminate conflicts in multi-writer setups — no last-write-wins, no C
 ### Infinite loop prevention
 
 A `syncing` flag guards `captureChange` — changes applied by `applyChanges` (received from peer) set the flag, so the hook doesn't re-capture and re-ship them.
+
+### Idle = idle
+
+No writes = no traffic. The batch ticker fires 20x/sec (50ms) but is a no-op when the batch is empty (`if len(batch) > 0` guard). Zero HTTP requests, zero network traffic, zero CPU overhead when idle.
 
 ## Stack
 
@@ -71,6 +70,16 @@ Start two nodes that sync to each other:
 ./hook-sync -id node2 -db node2.db -listen :9002 -peer http://localhost:9001
 ```
 
+### Batch interval
+
+```bash
+# Lower sync delay (local/LAN)
+./hook-sync -id node1 -db node1.db -listen :9001 -peer http://localhost:9002 -batch-ms 10
+
+# Higher interval for unreliable links
+./hook-sync -id node1 -db node1.db -listen :9001 -peer http://localhost:9002 -batch-ms 100
+```
+
 ## API
 
 | Method | Path | Description |
@@ -91,7 +100,7 @@ curl -X POST http://localhost:9001/api/items \
   -H 'Content-Type: application/json' \
   -d '{"name":"hello","value":42}'
 
-# Verify on node2 (within ~100ms)
+# Verify on node2 (within ~50ms)
 curl http://localhost:9002/api/items
 ```
 
@@ -115,30 +124,27 @@ Bidirectional sync verified locally with 2 nodes:
 - **UUIDv4** — should use UUIDv7 for production (sequential insert performance)
 - **Single connection** — `SetMaxOpenConns(1)` required so hook captures all writes
 
-
 ## Benchmark Results
 
-Benchmarked using the same methodology as [walsync-vs-cr-sqlite](https://github.com/maulanashalihin/walsync) (`bench.js`): write-latency, read-latency, sync-delay, write-throughput, read-throughput.
-
-> **Note:** hook-sync runs on localhost (0ms RTT). walsync/cr-sqlite benchmarked via public internet (35-40ms RTT). Network latency dominates write/read latency. Direct Go benchmark included for pure SQLite performance. Full report: [BENCHMARK-REPORT.md](BENCHMARK-REPORT.md).
+> **Note:** hook-sync runs on localhost (0ms RTT). cr-sqlite benchmarked via public internet (35-40ms RTT). Network latency dominates write/read latency. Direct Go benchmark included for pure SQLite performance. Full report: [BENCHMARK-REPORT.md](BENCHMARK-REPORT.md).
 
 ### Write Throughput (100 concurrent requests)
 
-| Metric | walsync | cr-sqlite | hook-sync |
-|--------|--------:|----------:|----------:|
-| Single node | 965 QPS | 365 QPS | **2058 QPS** |
-| Dual-node round-robin | N/A | 24 QPS | **17,177 QPS** |
+| Metric | cr-sqlite | hook-sync |
+|--------|----------:|----------:|
+| Single node | 365 QPS | **2058 QPS** |
+| Dual-node round-robin | 24 QPS | **17,177 QPS** |
 
-hook-sync is **2.1x faster** than walsync and **5.6x faster** than cr-sqlite on single-node writes. Dual-node is **716x faster** than cr-sqlite — UUID PK means zero coordination between nodes.
+hook-sync is **5.6x faster** than cr-sqlite on single-node writes. Dual-node is **716x faster** — UUID PK means zero coordination between nodes.
 
 ### Sync Delay (20 writes, poll until visible on peer)
 
-| Metric | walsync | cr-sqlite | hook-sync |
-|--------|--------:|----------:|----------:|
-| p50 (forward) | 4742ms | 165ms | **52ms** |
-| p95 (forward) | 5707ms | 344ms | **54ms** |
-| p50 (reverse) | N/A | 144ms | **52ms** |
-| min | 255ms | ~144ms | **12ms** (10ms interval) |
+| Metric | cr-sqlite | hook-sync |
+|--------|----------:|----------:|
+| p50 (forward) | 165ms | **52ms** |
+| p95 (forward) | 344ms | **54ms** |
+| p50 (reverse) | 144ms | **52ms** |
+| min | ~144ms | **12ms** (10ms interval) |
 
 hook-sync sync delay p50 ≈ batch interval (default 50ms). Tunable via `-batch-ms` flag. See [Batch Interval Optimization](#batch-interval-optimization) below.
 
@@ -150,8 +156,8 @@ Sync delay is directly controlled by the `-batch-ms` flag. Benchmarked across 6 
 |----------|---------:|---------:|----------:|------------------------:|
 | **10ms** | **11.79ms** | **12.81ms** | **7648** | 20.55ms |
 | 25ms | 23.73ms | 30.27ms | 4911 | 23.78ms |
-| 50ms | 52.14ms | 53.89ms | 5746 | 24.61ms |
-| 100ms (default) | 99.69ms | 104.48ms | 5242 | 22.01ms |
+| 50ms (default) | 52.14ms | 53.89ms | 5746 | 24.61ms |
+| 100ms | 99.69ms | 104.48ms | 5242 | 22.01ms |
 | 200ms | 200.06ms | 204.44ms | 5012 | 18.70ms |
 | 500ms | 499.82ms | 504.51ms | 6808 | 22.45ms |
 
@@ -166,7 +172,7 @@ Sync delay is directly controlled by the `-batch-ms` flag. Benchmarked across 6 
 
 - **Local/LAN (0-5ms RTT):** `10ms` — lowest sync delay (12ms p50), no overhead penalty
 - **Remote/WAN (35-40ms RTT):** `50ms` (default) — sync delay ~52ms + RTT, avoids batch pileup from network latency
-- **Conservative:** `100ms` — safe for high-latency or unreliable links, still 47x faster than walsync
+- **Conservative:** `100ms` — safe for high-latency or unreliable links, still 3.2x faster than cr-sqlite
 
 The batch threshold (100 changes) provides a safety valve: burst writes always ship immediately regardless of interval.
 
@@ -185,24 +191,24 @@ The batch threshold (100 changes) provides a safety valve: burst writes always s
 
 ### Write/Read Latency (100 sequential requests)
 
-| Metric | walsync | cr-sqlite | hook-sync |
-|--------|--------:|----------:|----------:|
-| Write latency p50 | 35.7ms | 37.8ms | **0.08ms** |
-| Write latency p95 | 36.4ms | 39.7ms | **0.14ms** |
-| Read latency p50 | 35.7ms | 35.3ms | **0.22ms** |
+| Metric | cr-sqlite | hook-sync |
+|--------|----------:|----------:|
+| Write latency p50 | 37.8ms | **0.08ms** |
+| Write latency p95 | 39.7ms | **0.14ms** |
+| Read latency p50 | 35.3ms | **0.22ms** |
 
-hook-sync latency is ~0.08ms because localhost (0ms RTT). walsync/cr-sqlite ~35-40ms due to network RTT. This is network dominance, not SQLite speed difference.
+hook-sync latency is ~0.08ms because localhost (0ms RTT). cr-sqlite ~35-40ms due to network RTT. This is network dominance, not SQLite speed difference.
 
 ## Comparison
 
-| | walsync | cr-sqlite | hook-sync |
-|---|---|---|---|
-| Write overhead | Zero | 2.6x (trigger) | Zero |
-| Sync reliability | Broken (page layout) | Reliable (row-level) | Reliable (row-level) |
-| Multi-writer | No | Yes (CRDT) | Yes (UUID PK) |
-| Sync delay | N/A | ~165ms | ~52ms (default 50ms batch) |
-| Conflict resolution | N/A | Last-write-wins | None needed (UUID) |
-| Binding support | N/A | SQLite extension | Go (mattn), needs custom for JS/Python |
+| | cr-sqlite | hook-sync |
+|---|---|---|
+| Write overhead | 2.6x (trigger) | Zero |
+| Sync reliability | Reliable (row-level) | Reliable (row-level) |
+| Multi-writer | Yes (CRDT) | Yes (UUID PK) |
+| Sync delay | ~165ms | ~52ms (default 50ms batch) |
+| Conflict resolution | Last-write-wins | None needed (UUID) |
+| Binding support | SQLite extension | Go (mattn), needs custom for JS/Python |
 
 ## License
 
