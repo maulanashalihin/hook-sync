@@ -40,22 +40,37 @@ No multi-hop. No relay. No hub. Each change goes directly from writer to all oth
 
 Ship to all peers. Each peer deduplicates via INSERT OR REPLACE. That's it.
 
-**Bandwidth scaling:** each change sent to N-1 peers. Connections = N*(N-1)/2.
 
-| Nodes | Connections | Each change sent | Bandwidth |
-|-------|------------|-----------------|-----------|
-| 2 | 1 | 1x | Fine |
-| 3 | 3 | 2x | Fine |
-| 5 | 10 | 4x | Fine |
-| 10 | 45 | 9x | Getting heavy |
-| 20 | 190 | 19x | Too much |
+**Scaling formula:** the real bottleneck is not connection count, but **messages per second each node must handle**:
 
-**Full mesh is the right choice up to ~5-7 nodes.** Beyond that, bandwidth and connection count make it impractical.
+```
+msgs/sec per node = (N - 1) × writes/sec per node
+```
+
+Each message ≈ 200 bytes JSON. Example with 1000 writes/sec per node:
+
+| Nodes | Msgs/sec per node | Bandwidth/node | Verdict |
+|-------|-------------------|---------------|---------|
+| 2 | 1,000 | 0.2 MB/s | Fine |
+| 5 | 4,000 | 0.8 MB/s | Fine |
+| 8 | 7,000 | 1.4 MB/s | Fine for LAN |
+| 15 | 14,000 | 2.8 MB/s | Pushing SQLite ingest |
+| 20 | 19,000 | 3.8 MB/s | Too much |
+
+**Cutoff depends on write rate, not node count alone:**
+
+| Write rate per node | Full mesh OK up to | Bottleneck |
+|--------------------|--------------------|------------|
+| 100 writes/sec | 15-20 nodes | HTTP overhead negligible |
+| 1,000 writes/sec | 8-12 nodes | SQLite ingest ~10K msg/sec |
+| 10,000 writes/sec | 3-5 nodes | SQLite can't keep up |
+
+Rule of thumb: **switch to dedicated hub when (N-1) × writes/sec exceeds ~10,000 per node.** That's where SQLite WAL write contention starts to degrade.
 
 
 ## When Full Mesh Doesn't Scale: Dedicated Hub
 
-For 8+ nodes, use a **dedicated hub** — a node that only relays changes, does not serve client requests.
+When full mesh hits the write-rate limit (see formula above), use a **dedicated hub** — a node that only relays changes, does not serve client requests.
 
 ```
   edge1 ──POST /sync──→ hub ──POST /sync──→ edge2
