@@ -151,17 +151,46 @@ hub crash after ACK, before forward?
 
 Verified: kill hub mid-traffic → write 5 items while hub down → restart hub → all edges converge to equal count, 0 pending, 0 dead letter.
 
-## Multi-Region: Hierarchical
 
-Regional hubs in full mesh. Edge nodes star to regional hub.
+## Multi-Region: Hub-to-Hub
+
+Each region has its own hub + edges. Hubs peer directly via `-edge` flag. Loop prevention via `X-Node-Url` header — hub skips forwarding back to the sender's URL.
 
 ```
-  edge1 ──→ US hub ←── edge2
-              ↕
-  edge3 ──→ EU hub ←── edge4
+  Region 1                         Region 2
+  edge1 ──→ hub A ←── edge2        edge3 ──→ hub B ←── edge4
+              ←────────────────→
+                 hub-to-hub
 ```
 
-US hub and EU hub in full mesh (2 peers each). Edge nodes peer to regional hub only.
+Flow: edge1 writes → hub A receives → forwards to edge2 + hub B (with `X-Node-Url: hubA`) → hub B sees `X-Node-Url: hubA`, skips forwarding back to hub A → forwards to edge3, edge4. No loop.
+
+**How it works:** Hub sends `X-Node-Url` header (its own URL, set via `--url` flag) with every forward. Receiving hub reads `X-Node-Url` and skips the edge that matches — no forward back to sender. Edge nodes don't send `X-Node-Url` (empty header), so hubs forward to all edges normally.
+
+```bash
+# Region 1
+./hook-sync-hub -id hubA -listen :9100 -url http://localhost:9100 -db hubA.pebble \
+  -edge http://localhost:9101 \
+  -edge http://localhost:9102 \
+  -edge http://localhost:9200   # hub B (peer hub)
+
+./hook-sync-mesh-go -id edge1 -db e1.db -listen :9101 -peer http://localhost:9100
+./hook-sync-mesh-go -id edge2 -db e2.db -listen :9102 -peer http://localhost:9100
+
+# Region 2
+./hook-sync-hub -id hubB -listen :9200 -url http://localhost:9200 -db hubB.pebble \
+  -edge http://localhost:9201 \
+  -edge http://localhost:9202 \
+  -edge http://localhost:9100   # hub A (peer hub)
+
+./hook-sync-mesh-go -id edge3 -db e3.db -listen :9201 -peer http://localhost:9200
+./hook-sync-mesh-go -id edge4 -db e4.db -listen :9202 -peer http://localhost:9200
+```
+
+**No bridge nodes needed.** Hubs peer directly. The `X-Node-Url` header is the only loop prevention mechanism — simple, no protocol changes, no origin tracking.
+
+Tested: `bash bench-multi-region.sh` — 5/5 PASS (cross-region convergence, bidirectional, persistence, hub down + reconnect, loop check).
+
 
 ## Topology Comparison
 
@@ -170,6 +199,7 @@ US hub and EU hub in full mesh (2 peers each). Edge nodes peer to regional hub o
 | Point-to-point | 1 | 1 | None | No | 2 nodes ✅ |
 | Full mesh | N*(N-1)/2 | 1 | N-1 paths | No | 3-7 nodes ✅ |
 | Star + relay | N-1 | 2 max | None | Hub | 8+ nodes ✅ |
+| Multi-region (bridge) | N-1 + bridges | 3-4 max | Bridge | Hub | 2+ regions ✅ |
 | Ring | N | N/2 avg | 1 path | No | Not recommended |
 | Chain | N-1 | N max | None | No | Not recommended |
 
@@ -200,21 +230,10 @@ Implemented in all 3 runtimes. Verified: 4-node mesh, 5/5 integrity PASS, 1000 i
 
 Implemented in `go/hub/main.go`. Verified: kill hub mid-traffic → write 5 items → restart → all edges converge, 0 pending, 0 dead letter.
 
-## Open Problems (Not Yet Solved)
+### Multi-region loop prevention
 
-### Multi-hub loop prevention
+**Solved with `X-Node-Url` header.** Hubs peer directly — no bridge nodes needed. Hub sends `X-Node-Url` header (its own URL) with every forward. Receiving hub skips the edge matching sender's URL. No origin tracking, no protocol changes. See [Multi-Region: Hub-to-Hub](#multi-region-hub-to-hub) above.
 
-Dedicated hub design solves duplicate forwarding for single-hub topology — hub receives from edges, forwards to edges, no loop possible.
-
-But in multi-region setup (hubs in full mesh), hub A forwards to hub B, hub B forwards back to hub A → infinite loop. Need **origin tracking**: each change carries `origin_node_id`. Hub skips forwarding back to the node it came from.
-
-```
-edge1 → hub A (origin=edge1) → hub B
-hub B sees origin=edge1, NOT hub A → forwards to edge3, edge4
-hub B does NOT forward back to hub A (origin=edge1, not hubA)
-```
-
-Not yet designed in detail. Only relevant when multi-region is built.
 
 ## What NOT to Do
 

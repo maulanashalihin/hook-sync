@@ -53,13 +53,14 @@ Sync runs in the background — it does not block the write path. The client get
 
 ## Topologies
 
-Three topologies, all built and verified across Go, Bun, and Node:
+Four topologies, all built and verified across Go, Bun, and Node:
 
 | Topology | Nodes | Connections | SPOF | Best for |
 |----------|------:|-------------|:----:|----------|
 | Point-to-point | 2 | 1 | No | Simple active-active replica |
 | Full mesh | 3-7 | N*(N-1)/2 | No | Multi-writer cluster, no coordinator |
 | Dedicated hub (star) | 8+ | N-1 | Hub | Scale past mesh limit, regional relay |
+| Multi-region (hub-to-hub) | 2+ regions | N-1 + hub peers | Hub | Cross-region sync |
 
 ### Point-to-point (2 nodes)
 
@@ -89,8 +90,18 @@ edge3 ──→ hub ──→ edge4
 ```
 
 Go-only hub with Pebble KV (LSM tree, write-optimized). No SQLite, no triggers — pure relay + backup. Hub ACKs immediately, forwards asynchronously. Durable forwarding queue survives hub crash. Edges use existing mesh scripts — hub is just a peer.
+See [TOPOLOGY.md](TOPOLOGY.md) for scaling formulas, hub design details, and multi-region setup.
 
-See [TOPOLOGY.md](TOPOLOGY.md) for scaling formulas, hub design details, and multi-region roadmap.
+### Multi-region (hub-to-hub)
+
+```
+  Region 1                         Region 2
+  edge1 ──→ hub A ←── edge2        edge3 ──→ hub B ←── edge4
+              ←────────────────→
+                 hub-to-hub
+```
+
+Each region has its own hub + edges. Hubs peer directly via `-edge` flag. Loop prevention via `X-Node-Url` header — hub skips forwarding back to sender's URL. No bridge nodes, no origin tracking, no protocol changes. Benchmark: `bash bench-multi-region.sh` — 5/5 PASS.
 
 ## Split-brain safety
 
@@ -144,6 +155,7 @@ hook-sync/
 ├── bench-dual-ack.sh         # Dual-writer benchmark, point-to-point (all 3 runtimes)
 ├── bench-fullmesh.sh         # Full mesh benchmark, 4 nodes all-to-all (all 3 runtimes)
 ├── bench-hub.sh              # Dedicated hub benchmark, 1 hub + 3 edges (all 3 runtimes)
+├── bench-multi-region.sh     # Multi-region benchmark, 2 hubs hub-to-hub (convergence + persistence + loop check)
 ├── bench-splitbrain.sh       # Split-brain safety test (partition, conflict, reconnect)
 ├── bench-stress.sh           # Volume stress test, 10K/100K/500K items (convergence + persistence + consistency)
 ├── bench-all.sh             # Run ALL benchmarks in one command (all topologies, all runtimes)
@@ -400,6 +412,7 @@ bash bench-all.sh
 bash bench-dual-ack.sh       # Point-to-point: 2 nodes, dual-writer throughput
 bash bench-fullmesh.sh       # Full mesh: 4 nodes, all-to-all sync
 bash bench-hub.sh            # Dedicated hub: 1 Go hub + 3 edges (star)
+bash bench-multi-region.sh   # Multi-region: 2 hubs hub-to-hub, convergence + persistence + loop check
 bash bench-splitbrain.sh     # Split-brain safety: partition, conflict, reconnect
 bash bench-stress.sh         # Volume stress: 10K/100K/500K items, convergence + persistence + consistency
 bash bench-trigger.sh        # Trigger overhead via HTTP (baseline vs with triggers, Go)
@@ -439,6 +452,7 @@ Each benchmark:
 - Split-brain: INSERT/UPDATE/DELETE conflicts converge, 36/36 PASS across all 3 runtimes ✅
 - Connection error retry: peer unreachable → no dead letter, retry next tick ✅
 - Volume stress: 500K items, all 3 runtimes, convergence + persistence + consistency 9/9 PASS ✅
+- Multi-region: hub-to-hub via `X-Node-Url` header, 5/5 PASS (convergence, bidirectional, persistence, hub down+reconnect, loop check) ✅
 
 ## Implement in Your Language
 
@@ -456,7 +470,6 @@ Reference implementations: `go/main.go` (~300 lines), `bun/server.ts` (~200 line
 
 ## Limitations
 
-- **No multi-region topology** — point-to-point, full mesh, and dedicated hub all work (see [Topologies](#topologies) above). Multi-region (hubs in full mesh) not yet built — needs origin tracking for loop prevention ([TOPOLOGY.md](TOPOLOGY.md))
 - **Multi-table requires manual setup** — adding a table means writing triggers + updating applyChanges dispatch (see `go/multitable/`, `bun/server-multitable.ts`, `node/server-multitable.js` for 2-table example)
 - **Localhost benchmark variance** — HTTP throughput varies 3-8x on localhost; use real network for reliable comparison
 - **Last-write-wins, not CRDT** — split-brain conflicts resolve by timestamp. Older update is silently dropped. Fine for append-heavy workloads; for collaborative editing of shared rows, use cr-sqlite

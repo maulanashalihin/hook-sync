@@ -57,6 +57,7 @@ func (e *edgeList) Set(v string) error {
 type Hub struct {
 	ID         string
 	Listen     string
+	MyURL      string // this hub's full URL (for X-Node-Url header)
 	Edges      []string
 	pdb        *pebble.DB
 	batchMs    int
@@ -70,6 +71,7 @@ func main() {
 		batchMs = flag.Int("batch-ms", 50, "forward sweep interval in milliseconds")
 		dbPath  = flag.String("db", "", "Pebble DB path (e.g. hub1.pebble)")
 		edges   edgeList
+		myURL   = flag.String("url", "", "this hub's full URL for hub-to-hub (e.g. http://localhost:9010)")
 	)
 	flag.Var(&edges, "edge", "edge node URL (repeatable, e.g. http://localhost:9001)")
 	flag.Parse()
@@ -86,9 +88,10 @@ func main() {
 	hub := &Hub{
 		ID:      *id,
 		Listen:  *listen,
+		MyURL:   *myURL,
 		Edges:   edges,
-		pdb:     pdb,
 		batchMs: *batchMs,
+		pdb:     pdb,
 	}
 
 	// Replay pending forwards from previous run (crash recovery)
@@ -138,10 +141,10 @@ func (h *Hub) applyBackup(changes []Change) int {
 // enqueueForward puts a durable forwarding entry in Pebble for each edge.
 // Key: "fwd:{counter}" → value: fwdEntry JSON.
 // The entry survives hub crash. On restart, replayPending re-sends.
-func (h *Hub) enqueueForward(batchID int64, changes []Change, senderID string) {
+func (h *Hub) enqueueForward(batchID int64, changes []Change, senderURL string) {
 	for _, edgeURL := range h.Edges {
-		if edgeURL == senderID {
-			continue // don't forward back to sender
+		if edgeURL == senderURL {
+			continue // don't forward back to sender (URL match, not node ID)
 		}
 		fwdID := atomic.AddUint64(&h.fwdCounter, 1)
 		entry := fwdEntry{BatchID: batchID, Changes: changes, EdgeURL: edgeURL}
@@ -154,7 +157,7 @@ func (h *Hub) enqueueForward(batchID int64, changes []Change, senderID string) {
 }
 
 // forwardOne sends changes to an edge and returns true on ACK match.
-func forwardOne(edgeURL string, batchID int64, changes []Change) bool {
+func (h *Hub) forwardOne(edgeURL string, batchID int64, changes []Change) bool {
 	reqBody := SyncRequest{BatchID: batchID, Changes: changes}
 	data, err := json.Marshal(reqBody)
 	if err != nil {
@@ -166,7 +169,10 @@ func forwardOne(edgeURL string, batchID int64, changes []Change) bool {
 		return false
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Node-Id", "hub")
+	req.Header.Set("X-Node-Id", h.ID)
+	if h.MyURL != "" {
+		req.Header.Set("X-Node-Url", h.MyURL)
+	}
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -206,7 +212,7 @@ func (h *Hub) tryForwardAll() {
 		if err := json.Unmarshal(val, &entry); err != nil {
 			continue
 		}
-		if forwardOne(entry.EdgeURL, entry.BatchID, entry.Changes) {
+		if h.forwardOne(entry.EdgeURL, entry.BatchID, entry.Changes) {
 			keysToDelete = append(keysToDelete, key)
 		}
 	}
@@ -263,7 +269,7 @@ func (h *Hub) forwardSweep() {
 			go func(key []byte, entry fwdEntry) {
 				defer wg.Done()
 				for attempt := range backoffs {
-					if forwardOne(entry.EdgeURL, entry.BatchID, entry.Changes) {
+					if h.forwardOne(entry.EdgeURL, entry.BatchID, entry.Changes) {
 						mu.Lock()
 						deleted = append(deleted, key)
 						mu.Unlock()
@@ -311,7 +317,7 @@ func (h *Hub) startHTTP() {
 
 	// POST /sync — receive changes from edge, ACK immediately, forward to others
 	app.Post("/sync", func(c *fiber.Ctx) error {
-		senderID := c.Get("X-Node-Id")
+		senderURL := c.Get("X-Node-Url") // from peer hub (URL, for loop prevention)
 		var req SyncRequest
 		if err := json.Unmarshal(c.Body(), &req); err != nil {
 			return c.Status(400).JSON(fiber.Map{"error": err.Error()})
@@ -321,7 +327,8 @@ func (h *Hub) startHTTP() {
 		applied := h.applyBackup(req.Changes)
 
 		// 2. Enqueue durable forwards (before ACK so crash doesn't lose them)
-		h.enqueueForward(req.BatchID, req.Changes, senderID)
+		//    senderURL = peer hub's URL → skip forwarding back to sender
+		h.enqueueForward(req.BatchID, req.Changes, senderURL)
 
 		// 3. ACK sender immediately (edge deletes from its _changes)
 		ack := fiber.Map{"applied": applied, "ack": req.BatchID}
