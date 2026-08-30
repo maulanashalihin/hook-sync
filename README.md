@@ -47,18 +47,46 @@ App write (native SQLite speed)
 
 **Bun (triggers):** AFTER INSERT/UPDATE/DELETE triggers write to `_changes` table. Background timer polls every 50ms, ships, deletes shipped rows. 1 extra INSERT per change (less overhead than cr-sqlite's N rows per column). Triggers use `WHEN (SELECT syncing FROM _meta) = 0` clause to prevent infinite loop.
 
-### UUIDv7 primary keys
+### UUID primary keys (mandatory)
 
-UUIDv7 PKs eliminate conflicts in multi-writer setups — no last-write-wins, no CRDT, no vector clocks. Each node generates independent UUIDs that never collide.
+UUID PKs are **required** for hook-sync. Multi-writer without UUID = data loss.
 
-UUIDv7 is time-ordered (RFC 9562), so inserts are sequential in the B-tree — append-like, no page splits. Benchmarked vs UUIDv4:
+**Why integer auto-increment breaks:**
 
-| Writes | UUIDv4 QPS | UUIDv7 QPS | UUIDv7 advantage |
-|-------:|-----------:|-----------:|----------------:|
-| 1,000 | 29,992 | 38,792 | 1.3x |
-| 100,000 | 19,365 | 39,850 | **2.1x** |
+```
+Node A: INSERT → rowid 1, 2, 3
+Node B: INSERT → rowid 1, 2, 3  ← same IDs!
+```
 
-UUIDv4 random inserts cause B-tree page splits at scale — QPS drops 50% at 100K writes. UUIDv7 stays stable.
+Sync to peer → `INSERT OR REPLACE` → rowid 1 from Node B overwrites rowid 1 from Node A. **Data lost silently.**
+
+**UUID solves this:**
+
+```
+Node A: INSERT → id 01a051a7-7749-...
+Node B: INSERT → id 01a051a7-78c1-...  ← different, no collision
+```
+
+Every node generates UUIDs independently — no coordinator needed, no collision possible. `INSERT OR REPLACE` is safe. No CRDT, no last-write-wins, no vector clocks.
+
+**Alternatives considered:**
+
+| Approach | Problem |
+|----------|---------|
+| Composite PK `(node_id, seq)` | `node_id` can change, seq restarts on DB corruption |
+| Range assignment (A: 1-1000, B: 1001-2000) | Needs coordinator, not scalable |
+| Snowflake ID | Needs machine ID assignment, clock sync |
+
+UUID is simplest: each node generates its own, never collides.
+
+**UUIDv7 vs UUIDv4 — each language uses the fastest for its runtime:**
+
+| Language | UUID | Why |
+|----------|------|-----|
+| Go | UUIDv7 | B-tree is bottleneck → time-ordered = sequential insert, 2.1x faster at 100K writes |
+| Bun | UUIDv4 | `crypto.randomUUID()` native C++ (31M gen QPS) → generation is bottleneck, 1.5x faster than JS UUIDv7 |
+
+UUIDv4 random inserts cause B-tree page splits at scale (QPS drops 50% at 100K writes in Go). UUIDv7 is time-ordered — append-like, no page splits. But in Bun, `bun:sqlite` is fast enough that B-tree overhead is negligible, and native UUIDv4 generation crushes JS UUIDv7 by 18x.
 
 ### Idle = idle
 
