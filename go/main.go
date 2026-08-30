@@ -142,7 +142,9 @@ func (n *Node) setupSchema() {
 		CREATE TRIGGER IF NOT EXISTS items_ad AFTER DELETE ON items
 		WHEN (SELECT value FROM _meta WHERE key = 'syncing') = 0
 		BEGIN
-			INSERT INTO _changes(op, row_id, row_data) VALUES('DELETE', OLD.id, NULL);
+			INSERT INTO _changes(op, row_id, row_data) VALUES('DELETE', OLD.id,
+				json_object('id', OLD.id, 'name', OLD.name, 'value', OLD.value,
+					'created_at', OLD.created_at, 'updated_at', OLD.updated_at, 'node_id', OLD.node_id));
 		END;
 	`)
 	if err != nil {
@@ -205,6 +207,9 @@ func (n *Node) batchShip() {
 				c := Change{Op: cr.Op, Table: "items"}
 				if cr.Op == "DELETE" {
 					c.OldID = cr.RowID
+					if cr.RowData != "" {
+						json.Unmarshal([]byte(cr.RowData), &c.Row)
+					}
 				} else if cr.RowData != "" {
 					json.Unmarshal([]byte(cr.RowData), &c.Row)
 				}
@@ -213,6 +218,7 @@ func (n *Node) batchShip() {
 
 			// Ship with retry
 			acked := false
+			connError := false
 			for attempt := 0; attempt < 5; attempt++ {
 				if attempt > 0 {
 					time.Sleep(backoffs[attempt-1] * time.Millisecond)
@@ -220,8 +226,10 @@ func (n *Node) batchShip() {
 				resp, err := n.shipWithAck(batchID, changes)
 				if err != nil {
 					log.Printf("[%s] ship attempt %d error: %v", n.ID, attempt+1, err)
+					connError = true
 					continue
 				}
+				connError = false
 				if resp.Ack == batchID {
 					// ACK confirmed — delete shipped changes
 					n.db.Exec("DELETE FROM _changes WHERE change_id <= ?", batchID)
@@ -232,7 +240,12 @@ func (n *Node) batchShip() {
 			}
 
 			if !acked {
-				log.Printf("[%s] ship failed after 5 retries, moving to _dead_letter", n.ID)
+				if connError {
+					// Peer not reachable — keep changes in _changes, try again next tick
+					log.Printf("[%s] peer unreachable, keeping %d changes for next tick", n.ID, len(crs))
+					break // stop draining, try again next tick
+				}
+				log.Printf("[%s] ship failed after 5 retries (ACK mismatch), moving to _dead_letter", n.ID)
 				for _, cr := range crs {
 					n.db.Exec("INSERT INTO _dead_letter(op, row_id, row_data, failed_at, retry_count) VALUES(?, ?, ?, ?, ?)",
 						cr.Op, cr.RowID, cr.RowData, time.Now().UnixMilli(), 5)
@@ -474,6 +487,13 @@ func (n *Node) applyChanges(changes []Change) int {
 			updatedAt := toInt64(c.Row["updated_at"])
 			nodeID, _ := c.Row["node_id"].(string)
 
+			// Last-write-wins: skip if existing row is newer than incoming
+			var existingUpdatedAt int64
+			if err := tx.QueryRow("SELECT updated_at FROM items WHERE id = ?", id).Scan(&existingUpdatedAt); err == nil {
+				if existingUpdatedAt > updatedAt {
+					continue
+				}
+			}
 			_, err := tx.Exec(
 				"INSERT OR REPLACE INTO items(id, name, value, created_at, updated_at, node_id) VALUES(?, ?, ?, ?, ?, ?)",
 				id, name, value, createdAt, updatedAt, nodeID,
@@ -487,6 +507,16 @@ func (n *Node) applyChanges(changes []Change) int {
 		case "DELETE":
 			if c.OldID == "" {
 				continue
+			}
+			// Last-write-wins: skip delete if row was updated after deletion
+			if c.Row != nil {
+				deleteUpdatedAt := toInt64(c.Row["updated_at"])
+				var existingUpdatedAt int64
+				if err := tx.QueryRow("SELECT updated_at FROM items WHERE id = ?", c.OldID).Scan(&existingUpdatedAt); err == nil {
+					if existingUpdatedAt > deleteUpdatedAt {
+						continue // row was updated after delete, keep the update
+					}
+				}
 			}
 			_, err := tx.Exec("DELETE FROM items WHERE id = ?", c.OldID)
 			if err != nil {
