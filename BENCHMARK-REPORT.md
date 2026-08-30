@@ -228,7 +228,7 @@ Both configured with equivalent durability: no fsync per write.
 
 | System | Durability | QPS median | QPS min | QPS max | Replica converge | Integrity |
 |--------|------------|--------:|--------:|--------:|:----------------:|:---------:|
-| hook-sync | `synchronous=NORMAL` | 6,065 | 5,469 | 6,438 | ~30s (async batch) | 100K, 0 pending, 0 dead letter |
+| hook-sync | `synchronous=NORMAL` | 6,065 | 5,469 | 6,438 | ~2s (batch 10K + drain) | 100K, 0 pending, 0 dead letter |
 | Postgres | `synchronous_commit=off` | **6,238** | 5,504 | 7,392 | ~3s (WAL streaming) | 100K |
 
 **At equivalent durability, throughput is tied** — Postgres +2.8% (within noise). Raw write performance is not the differentiator.
@@ -239,7 +239,7 @@ Postgres default `synchronous_commit=on` (fsync per write) vs hook-sync `synchro
 
 | System | Durability | QPS median | Replica converge | Integrity |
 |--------|------------|--------:|:----------------:|:---------:|
-| hook-sync | `synchronous=NORMAL` | 5,857 | ~30s | 100K, 0 pending, 0 dead |
+| hook-sync | `synchronous=NORMAL` | 5,857 | ~2s | 100K, 0 pending, 0 dead |
 | hook-sync (no peer, baseline) | `synchronous=NORMAL` | 5,749 | — | 100K |
 | Postgres | `synchronous_commit=on` | 4,377 | ~3s | 100K |
 
@@ -255,7 +255,7 @@ hook-sync with peer (5,857) vs without peer (5,749) — difference is noise. Syn
 |--------|----------|----------|--------|
 | Write throughput (fair durability) | 6,065 | 6,238 | **Tie** (Postgres +2.8%, noise) |
 | Sync overhead | ~0% (background goroutine) | WAL sender overhead | **hook-sync** |
-| Replica lag | ~30s (batch async) | ~3s (WAL streaming) | **Postgres** |
+| Replica lag | ~2s (batch 10K + drain) | ~3s (WAL streaming) | **hook-sync** |
 | Cross-runtime | Go, Bun, Node — same protocol | Go-only (pgx) | **hook-sync** |
 | Topology | Point-to-point, full mesh, hub | Primary-replica only | **hook-sync** |
 | Multi-writer | Yes (UUID PK, idempotent) | No (primary-only writes) | **hook-sync** |
