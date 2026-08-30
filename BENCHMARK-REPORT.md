@@ -136,38 +136,59 @@ Tested with Go, peer unreachable (port 9999 nothing listening):
 | hook-sync | HTTP → SQLite INSERT + trigger → return | ACK-based async HTTP sync (background goroutine) | SQLite WAL |
 | Postgres | HTTP → pgx pool → INSERT → WAL flush | Streaming replication (WAL sender → replica) | PostgreSQL 18 |
 
-### Results (100K writes)
+### Results: fair comparison (both fast durability)
 
-| System | QPS median | QPS min | QPS max | Replica converge | Integrity |
-|--------|--------:|--------:|--------:|:----------------:|:---------:|
-| hook-sync (with peer) | **5,857** | 5,057 | 6,233 | ~30s (async batch) | 100K, 0 pending, 0 dead letter |
-| hook-sync (no peer, baseline) | 5,749 | 5,082 | 6,523 | — | 100K |
-| Postgres (with streaming replication) | 4,377 | 4,005 | 4,719 | ~3s (WAL streaming) | 100K |
+Both configured with equivalent durability: no fsync per write.
 
-### Analysis
+- hook-sync: `synchronous=NORMAL` (WAL flush at checkpoint, not per write)
+- Postgres: `synchronous_commit=off` (ACK before WAL flush)
 
-**hook-sync 34% faster than Postgres** with active replication.
+| System | Durability | QPS median | QPS min | QPS max | Replica converge | Integrity |
+|--------|------------|--------:|--------:|--------:|:----------------:|:---------:|
+| hook-sync | `synchronous=NORMAL` | 6,065 | 5,469 | 6,438 | ~30s (async batch) | 100K, 0 pending, 0 dead letter |
+| Postgres | `synchronous_commit=off` | **6,238** | 5,504 | 7,392 | ~3s (WAL streaming) | 100K |
 
-**Sync overhead = ~0%.** hook-sync with peer (5,857) vs without peer (5,749) — difference is noise, not sync overhead. Sync runs in background goroutine, completely decoupled from write path.
+**At equivalent durability, throughput is tied** — Postgres +2.8% (within noise). Raw write performance is not the differentiator.
 
-**Why hook-sync wins:**
-- Write path = local SQLite INSERT + trigger capture only. Client gets response immediately.
-- Sync runs async in background: read `_changes` → batch → HTTP POST to peer. Peer latency does not affect write.
-- SQLite WAL mode: single-writer, lightweight. No WAL sender process, no replication slot overhead.
+### Results: Postgres default durability (unfair to Postgres)
 
-**Why Postgres is slower:**
-- `synchronous_commit=on` (default): every write waits for WAL flush to disk before ACK.
-- WAL sender process reads WAL and streams to replica — adds overhead to write path.
-- Heavier per-query overhead (connection pool, query planner, MVCC).
+Postgres default `synchronous_commit=on` (fsync per write) vs hook-sync `synchronous=NORMAL` (no fsync per write). This is the earlier benchmark — included for reference, but not a fair comparison.
 
-**Postgres advantage: replica lag.** Postgres replica converges in ~3s (WAL streaming, synchronous). hook-sync takes ~30s (batch async, 50ms interval). Tradeoff: hook-sync gets higher write throughput, Postgres gets lower replica lag.
+| System | Durability | QPS median | Replica converge | Integrity |
+|--------|------------|--------:|:----------------:|:---------:|
+| hook-sync | `synchronous=NORMAL` | 5,857 | ~30s | 100K, 0 pending, 0 dead |
+| hook-sync (no peer, baseline) | `synchronous=NORMAL` | 5,749 | — | 100K |
+| Postgres | `synchronous_commit=on` | 4,377 | ~3s | 100K |
+
+hook-sync appeared 34% faster, but only because Postgres was fsync-ing every write while hook-sync was not. Not a fair comparison.
+
+### Sync overhead = ~0%
+
+hook-sync with peer (5,857) vs without peer (5,749) — difference is noise. Sync runs in background goroutine, completely decoupled from write path. Client gets response after SQLite INSERT, never waits for sync.
+
+### Where each system wins
+
+| Metric | hook-sync | Postgres | Winner |
+|--------|----------|----------|--------|
+| Write throughput (fair durability) | 6,065 | 6,238 | **Tie** (Postgres +2.8%, noise) |
+| Sync overhead | ~0% (background goroutine) | WAL sender overhead | **hook-sync** |
+| Replica lag | ~30s (batch async) | ~3s (WAL streaming) | **Postgres** |
+| Cross-runtime | Go, Bun, Node — same protocol | Go-only (pgx) | **hook-sync** |
+| Topology | Point-to-point, full mesh, hub | Primary-replica only | **hook-sync** |
+| Multi-writer | Yes (UUID PK, idempotent) | No (primary-only writes) | **hook-sync** |
+| Operational complexity | Single binary + SQLite file | Postgres cluster + replication config | **hook-sync** |
 
 ### All QPS data
 
 ```
-hook-sync (with peer):    5900, 5807, 5544, 5857, 5830, 5672, 5994, 6017, 5057, 6233
-hook-sync (no peer):      5685, 5749, 5736, 5726, 5816, 6296, 6523, 5821, 5399, 5082
-Postgres (with replica):  4416, 4263, 4719, 4148, 4187, 4334, 4431, 4515, 4377, 4005
+Fair durability:
+  hook-sync (synchronous=NORMAL, with peer):    5633, 6286, 6170, 5636, 6230, 5841, 5745, 6438, 6065, 5469
+  Postgres  (synchronous_commit=off, replica):  6235, 5727, 6426, 6262, 5504, 6238, 7392, 6065, 6074, 6778
+
+Postgres default durability (unfair):
+  hook-sync (synchronous=NORMAL, with peer):    5900, 5807, 5544, 5857, 5830, 5672, 5994, 6017, 5057, 6233
+  hook-sync (synchronous=NORMAL, no peer):      5685, 5749, 5736, 5726, 5816, 6296, 6523, 5821, 5399, 5082
+  Postgres  (synchronous_commit=on, replica):   4416, 4263, 4719, 4148, 4187, 4334, 4431, 4515, 4377, 4005
 ```
 
 ---
