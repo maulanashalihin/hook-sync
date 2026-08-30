@@ -2,4 +2,5 @@
 *.db-shm
 *.db-wal
 hook-sync
+node_modules/
 /tmp/
