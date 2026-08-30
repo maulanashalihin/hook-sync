@@ -1,118 +1,77 @@
 # Topology Recommendations
 
-hook-sync currently supports **point-to-point only** (2 nodes). This document covers what works today, what doesn't, and what would need to change for each topology.
+hook-sync currently supports **point-to-point only** (2 nodes, one `--peer` per node). This document covers what works today and what would need to change for larger fleets.
 
 ## Current State
 
-Each node has one `--peer` URL. The connection is bidirectional — both nodes ship and receive from each other.
+Each node has one `--peer` URL. Both nodes ship and receive from each other.
 
 ```
 Node A ←→ Node B
 ```
 
-This works. Tested and verified across all runtime pairs (Go, Bun, Node).
+Tested and verified across all runtime pairs (Go, Bun, Node).
 
-## Why Multi-Hop Doesn't Work Today
+## The Simplest Multi-Node: Full Mesh
 
-The `syncing` flag prevents infinite loops — when a node applies received changes, triggers are suppressed so changes aren't re-captured and re-shipped.
-
-**Side effect:** changes don't propagate beyond 1 hop.
-
-```
-A writes → A ships to B → B applies (syncing=1, triggers suppressed)
-                              ↓
-                    B does NOT re-ship to C
-                              ↓
-                    C never sees A's changes
-```
-
-Example: 3-node ring A→B→C→A. A writes, ships to B. B applies, but B's triggers don't fire (syncing=1). B ships its own local changes to C, but NOT A's changes. C never gets A's data. **Ring, chain, and star topologies are broken with current code.**
-
-## What Would Need to Change
-
-To support multi-hop, a node must **forward received changes** without re-applying them. Two approaches:
-
-### Option 1: Relay mode
-
-Node receives changes from peer A, applies them locally, AND forwards them to peer B. The `syncing` flag still prevents local trigger re-capture, but the node explicitly forwards the raw received changes to its other peer.
-
-```
-A → B (apply + forward) → C (apply)
-```
-
-**Cost:** each node needs to track multiple peers and forward logic. Changes travel N hops with N× latency.
-
-**Risk:** duplicate delivery. If A→B→C and A→C both exist (mesh), C receives the same change twice. INSERT OR REPLACE makes this safe (idempotent), but wastes bandwidth.
-
-### Option 2: Change log with watermark
-
-Each node tracks the highest `change_id` it has received from each peer. Instead of forwarding, nodes exchange their `_changes` table directly. Peer asks "give me everything after change_id X".
-
-```
-A: _changes has [1..100]
-B: asks A "give me after 50" → A sends [51..100]
-C: asks B "give me after 30" → B sends [31..100] (including A's changes that B applied)
-```
-
-**Cost:** requires protocol change from push to pull, or hybrid. More complex but handles mesh topology cleanly.
-
-**Risk:** `_changes` table grows unbounded if peers are offline. Need compaction strategy.
-
-## Topology Comparison
-
-Assuming multi-hop support is added:
-
-| Topology | Connections | Latency | Redundancy | Node failure | Best for |
-|----------|------------|---------|------------|-------------|----------|
-| Point-to-point | 1 | 1 hop | None | Other node loses sync | 2-node backup |
-| Star | N-1 | 2 hops max | None (hub = SPOF) | Hub down = all disconnected | Edge → cloud |
-| Ring | N | N/2 hops avg | 1 path | Breaks ring, needs reconnect | Small fleet, low overhead |
-| Full mesh | N*(N-1)/2 | 1 hop | N-1 paths | Others still connected | Small fleet (≤5), max redundancy |
-| Line/chain | N-1 | N hops max | None | Splits chain | Not recommended |
-
-## Recommendations
-
-### 2 nodes (current): point-to-point
-
-Already works. No changes needed.
-
-```
-Mac/edge server ←→ VPS backup
-```
-
-Use case: live replica for failover. Write to primary, sync to backup. If primary dies, backup has full data.
-
-### 3-5 nodes: full mesh (needs multi-peer support)
-
-Every node peers with every other. 1-hop latency, max redundancy. INSERT OR REPLACE handles duplicate delivery safely.
+**Every node knows every other node. Each node ships changes to all peers directly.**
 
 ```
     A ←→ B
-    ↕  ×  ↕
+    ↕     ↕
     C ←→ D
 ```
 
-**What to build:** change `--peer` from single string to repeated flag (`--peer URL1 --peer URL2`). Ship to all peers. Each peer deduplicates via INSERT OR REPLACE.
+No multi-hop. No relay. No hub. Each change goes directly from writer to all other nodes in 1 hop.
 
-**Connection count:** 3 nodes = 3, 4 nodes = 6, 5 nodes = 10. Manageable.
+**Why this works with current protocol:** INSERT OR REPLACE with UUID PK is idempotent. If A ships to B and C, and B also ships to C, C receives the same change twice — safe, no duplicates. The `syncing` flag is not a problem because each node receives changes directly from the writer, not through intermediaries.
 
-### 6+ nodes: star with relay (needs relay mode)
+**What to build:** change `--peer` from single string to repeated flag:
 
-One hub node, all edges connect to hub. Hub forwards changes between edges.
+```bash
+./hook-sync-go -id nodeA -db a.db -listen :9001 \
+  -peer http://localhost:9002 \
+  -peer http://localhost:9003 \
+  -peer http://localhost:9004
+```
+
+Ship to all peers. Each peer deduplicates via INSERT OR REPLACE. That's it.
+
+**Bandwidth scaling:** each change sent to N-1 peers. Connections = N*(N-1)/2.
+
+| Nodes | Connections | Each change sent | Bandwidth |
+|-------|------------|-----------------|-----------|
+| 2 | 1 | 1x | Fine |
+| 3 | 3 | 2x | Fine |
+| 5 | 10 | 4x | Fine |
+| 10 | 45 | 9x | Getting heavy |
+| 20 | 190 | 19x | Too much |
+
+**Full mesh is the right choice up to ~5-7 nodes.** Beyond that, bandwidth and connection count make it impractical.
+
+## When Full Mesh Doesn't Scale: Star + Relay
+
+For 8+ nodes, use a hub. Edge nodes only connect to hub. Hub forwards changes between edges.
 
 ```
   edge1 ──→ hub ←── edge2
             ↑
-         edge3
+         edge3, edge4, ...
 ```
 
-**What to build:** relay mode (Option 1). Hub receives from edge1, applies locally, forwards to edge2 + edge3.
+**Why this needs new code:** edge1 writes, ships to hub. Hub applies. But hub's `syncing` flag suppresses triggers — hub does NOT re-capture and re-ship to edge2. Edge2 never sees edge1's changes.
 
-**Trade-off:** hub is single point of failure. Mitigate with hub backup (hub ←→ hub-backup, point-to-point).
+**Fix: relay mode.** Hub receives changes from edge1, applies locally, AND forwards the raw changes to edge2, edge3, etc. The `syncing` flag still prevents trigger re-capture, but hub explicitly forwards received changes to other peers.
 
-### Multi-region: hierarchical star
+```
+edge1 → hub (apply + forward) → edge2, edge3, edge4
+```
 
-Regional hubs in full mesh, edge nodes star to regional hub.
+**Trade-off:** hub is single point of failure. Mitigate: hub ←→ hub-backup (point-to-point, already works).
+
+## Multi-Region: Hierarchical
+
+Regional hubs in full mesh. Edge nodes star to regional hub.
 
 ```
   edge1 ──→ US hub ←── edge2
@@ -120,16 +79,27 @@ Regional hubs in full mesh, edge nodes star to regional hub.
   edge3 ──→ EU hub ←── edge4
 ```
 
-**What to build:** multi-peer + relay mode. US hub and EU hub in full mesh (2 peers each). Edge nodes peer to regional hub only (1 peer).
+US hub and EU hub in full mesh (2 peers each). Edge nodes peer to regional hub only.
+
+## Topology Comparison
+
+| Topology | Connections | Hops | Redundancy | SPOF | Best for |
+|----------|------------|------|------------|------|----------|
+| Point-to-point | 1 | 1 | None | No | 2 nodes (current) |
+| Full mesh | N*(N-1)/2 | 1 | N-1 paths | No | 3-7 nodes |
+| Star + relay | N-1 | 2 max | None | Hub | 8+ nodes |
+| Ring | N | N/2 avg | 1 path | No | Not recommended |
+| Chain | N-1 | N max | None | No | Not recommended |
 
 ## Implementation Priority
 
-1. **Multi-peer support** (`--peer` repeated flag) — enables full mesh for 3-5 nodes. Smallest change, highest value.
-2. **Relay mode** — enables star topology for 6+ nodes. Medium complexity.
-3. **Watermark-based pull** — enables eventual consistency at scale. Highest complexity, defer until needed.
+1. **Multi-peer support** (`--peer` repeated flag) — enables full mesh for 3-7 nodes. Smallest change, highest value. Just loop over peers in ship function.
+2. **Relay mode** — enables star for 8+ nodes. Hub forwards received changes to other peers. Medium complexity.
+3. **Watermark-based pull** — nodes ask "give me changes after X" instead of push. For unreliable networks / eventual consistency at scale. Highest complexity, defer until needed.
 
 ## What NOT to Do
 
 - **Don't build topology management into the protocol.** Keep protocol simple (ship changes, ACK). Topology is a node-config concern.
 - **Don't add a coordinator.** UUID PKs eliminate the need for central ID assignment. Keep it decentralized.
-- **Don't add conflict resolution.** INSERT OR REPLACE with UUID PK = no conflicts. Last-write-wins via `updated_at` if needed, but don't build CRDT/vector clocks.
+- **Don't add conflict resolution.** INSERT OR REPLACE with UUID PK = no conflicts. No CRDT, no vector clocks.
+- **Don't build ring or chain topologies.** They add latency and fragility with no benefit over full mesh (small N) or star (large N).
