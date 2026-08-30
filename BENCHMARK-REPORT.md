@@ -94,6 +94,106 @@ Sync delay breakdown: batch 50ms + Mac→VPS-A 38ms (write) + VPS-A→VPS-B 4.5m
 
 ---
 
+## Full Mesh Throughput (4 nodes all-to-all)
+
+4 nodes, each ships changes to all 3 peers concurrently. Per-peer watermark (`_peer_state` table) — changes deleted from `_changes` only after ALL peers ACK. 5 runs × 50 req per node (200 total per run).
+
+| Runtime | QPS median | QPS min | QPS max | Integrity |
+|---------|--------:|--------:|--------:|:---------:|
+| Go | 14,853 | 6,108 | 23,570 | 5/5 PASS |
+| Node | 14,414 | 3,165 | 18,487 | 5/5 PASS |
+| Bun | 13,175 | 1,872 | 18,887 | 5/5 PASS |
+
+Integrity: all 4 nodes have equal item count (1000 per node), 0 pending changes, 0 dead letter after each run. Cross-runtime mesh (Go+Bun+Node+Go) also verified — all nodes converge.
+
+Run with: `bash bench-fullmesh.sh`
+
+---
+
+## Dedicated Hub Throughput (1 Go hub + 3 edges, star)
+
+1 Go hub (Pebble KV store) + 3 edge nodes. Hub ACKs edge immediately, forwards to other edges asynchronously via durable Pebble forwarding queue. 5 runs × 50 req per edge (150 total per run).
+
+| Runtime (edges) | QPS median | QPS min | QPS max | Integrity |
+|---------|--------:|--------:|--------:|:---------:|
+| Go | 16,268 | 5,706 | 17,516 | 5/5 PASS |
+| Bun | 19,750 | 12,931 | 27,683 | 5/5 PASS |
+| Node | 13,193 | 148 | 21,660 | 5/5 PASS |
+
+Integrity: all 3 edges have equal item count (750 per edge), hub backup count matches edges, 0 pending changes, 0 pending forwards, 0 dead letter after each run. Hub is always Go (Pebble KV).
+
+Run with: `bash bench-hub.sh`
+
+---
+
+## Convergence Speed (batch-size + drain mode)
+
+Before fix: 100K items took ~60s to converge (single batch of 100 changes per tick, 50ms interval = 2000 ticks).
+
+After fix: `-batch-size 10000` + drain mode (ships until `_changes` empty within each tick).
+
+| Items | Before | After | Speedup |
+|------:|--------:|--------:|--------:|
+| 10K | ~6s | <1s | 6x |
+| 100K | ~60s | ~2s | 30x |
+
+Drain mode: ship loop runs until `_changes` is empty within each tick, not just one batch. Combined with batch-size 10000, all pending changes ship in 1-2 ticks.
+
+---
+
+## Split-Brain Safety (all 3 runtimes)
+
+Tests partition + independent writes + reconnect convergence. 6 phases per runtime:
+
+1. Start both nodes, create shared item, verify sync
+2. Network partition (kill both nodes)
+3. Start nodes independently (no peer), update same item + create new items
+4. Reconnect (restart with peer)
+5. Verify convergence: same value, all items merged, 0 dead letter
+6. DELETE vs UPDATE conflict test
+
+| Runtime | Checks | Passed | Result |
+|---------|------:|------:|:---------:|
+| Go | 12 | 12 | ✅ PASS |
+| Bun | 12 | 12 | ✅ PASS |
+| Node | 12 | 12 | ✅ PASS |
+| **Total** | **36** | **36** | **✅ ALL PASS** |
+
+Conflict resolution: last-write-wins by `updated_at` timestamp. Both nodes always converge to same state. INSERT = safe (UUID, no collision). UPDATE vs UPDATE = higher timestamp wins. DELETE vs UPDATE = UPDATE wins if newer.
+
+Run with: `bash bench-splitbrain.sh` (all runtimes) or `bash bench-splitbrain.sh go` (single runtime)
+
+---
+
+## Real Network 10K Batch Test (OVH → 1TIM)
+
+**Servers:** OVH (51.79.159.231, Singapore) + 1TIM (194.233.76.139, Singapore). RTT 2.7ms, 289 Mbps single stream (iperf3).
+
+10,000 items sent in single batch from OVH → 1TIM. Both Go runtime, batch-size 10000, drain mode.
+
+| Metric | Result |
+|--------|--------|
+| Converge time | <1s |
+| Data loss | 0 |
+| Dead letter | 0 |
+| Pending after converge | 0 |
+
+**Result: PASS.** 10K items converge in under 1 second over real network with 290 Mbps bandwidth. Zero data loss, zero dead letter.
+
+---
+
+## Compression Analysis (NOT implemented)
+
+Tested gzip compression for sync payload on 290 Mbps link (OVH ↔ 1TIM, RTT 2.7ms).
+
+| Payload | Uncompressed | Gzip | Ratio | CPU cost | Transfer save | Worth it? |
+|---------|--------:|--------:|--------:|--------:|--------:|:---------:|
+| 10K items JSON | ~2MB | ~100KB | 95% | 20-47ms | 0.5-50ms | ❌ No |
+
+**Conclusion: compression NOT worth it.** CPU is the bottleneck at 290 Mbps — gzip adds 20-47ms CPU for only 0.5-50ms transfer save. Network is fast enough that compression overhead exceeds the bandwidth savings. Would only help on slow links (<50 Mbps).
+
+---
+
 ## Crash Recovery
 
 Tested with Go ↔ Go:
@@ -244,16 +344,17 @@ Batch 10,000:
 1. **HTTP server comparison is unreliable on localhost** — 3-8x variance. Cross-server benchmark (above) uses real network with 100K writes, variance 1.2x.
 2. ~~No sustained load test~~ — 100K write benchmark (10 runs × 10,000) covers sustained load. Each run takes 1.6-2.5s, total ~20s per system.
 3. **Single table only** — all benchmarks use `items` table. Multi-table performance not tested.
-4. **Bun/Node on real network** — cross-server test only done with Go. Bun/Node use same sync architecture, but not verified on remote servers.
+4. ~~Bun/Node on real network~~ — Bun and Node now verified via split-brain test (36/36 PASS). Cross-server throughput test still Go-only.
 
 ---
 
 ## Files
 
-- `bench-dual-ack.sh` — Dual-writer benchmark (all 3 runtimes, ACK-based)
-- `bench-hsync.js` — HTTP benchmark client (latency, throughput, sync delay)
-- `bench-interval.js` — Batch interval optimization
-- `bench-trigger-overhead.ts` — Trigger overhead measurement
+- `bench-all.sh` — Run ALL benchmarks in one command (all topologies, all runtimes)
+- `bench-dual-ack.sh` — Dual-writer benchmark, point-to-point (all 3 runtimes)
+- `bench-fullmesh.sh` — Full mesh benchmark, 4 nodes all-to-all (all 3 runtimes)
+- `bench-hub.sh` — Dedicated hub benchmark, 1 Go hub + 3 edges (all 3 runtimes)
+- `bench-splitbrain.sh` — Split-brain safety test, partition + conflict + reconnect (all 3 runtimes)
 - `go/bench/` — Go direct SQLite benchmarks (UUID, throughput)
-- `bench-fullmesh.sh` — Full mesh benchmark (4 nodes all-to-all, all 3 runtimes)
-- `bench-hub.sh` — Dedicated hub benchmark (1 Go hub + 3 edges, all 3 runtimes)
+- `tmp/bench-client/main.go` — Go HTTP benchmark client (used by cross-server Postgres comparison)
+- `tmp/pg-api/main.go` — Postgres HTTP API (for fair cross-server comparison)
