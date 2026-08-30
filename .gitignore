@@ -2,5 +2,8 @@
 *.db-shm
 *.db-wal
 hook-sync
+hook-sync-mesh-go
+hook-sync-hub
+*.pebble/
 node_modules/
 /tmp/

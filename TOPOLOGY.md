@@ -1,8 +1,10 @@
 # Topology Recommendations
 
-hook-sync currently supports **point-to-point only** (2 nodes, one `--peer` per node). This document covers what works today and what would need to change for larger fleets.
+hook-sync supports **point-to-point** (2 nodes), **full mesh** (3-7 nodes), and **dedicated hub / star** (8+ nodes) topologies. All three are built and verified. This document covers what works today, scaling limits, and remaining work for multi-region.
 
 ## Current State
+
+### Point-to-point (2 nodes)
 
 Each node has one `--peer` URL. Both nodes ship and receive from each other.
 
@@ -10,36 +12,45 @@ Each node has one `--peer` URL. Both nodes ship and receive from each other.
 Node A ←→ Node B
 ```
 
-Tested and verified across all runtime pairs (Go, Bun, Node).
+Tested and verified across all runtime pairs (Go, Bun, Node). Files: `go/main.go`, `bun/server.ts`, `node/server.js`.
 
-## The Simplest Multi-Node: Full Mesh
+### Full mesh (3-7 nodes)
 
-**Every node knows every other node. Each node ships changes to all peers directly.**
+Every node ships changes to all peers directly. Repeated `--peer` flag. Per-peer watermark in `_peer_state` table — changes deleted from `_changes` only after ALL peers ACK. Offline peers' changes accumulate until reconnection.
 
 ```
     A ←→ B
     ↕ ╳ ↕
     C ←→ D
-
-A connects to B, C, D. B connects to A, C, D. Etc.
-6 connections for 4 nodes. Every node talks to every other directly.
 ```
 
-No multi-hop. No relay. No hub. Each change goes directly from writer to all other nodes in 1 hop.
+Tested and verified: 4-node all-to-all, all 3 runtimes, cross-runtime mesh (Go+Bun+Node+Go). Files: `go/mesh/main.go`, `bun/server-mesh.ts`, `node/server-mesh.js`. Benchmark: `bash bench-fullmesh.sh`.
 
-**Why this works with current protocol:** INSERT OR REPLACE with UUID PK is idempotent. If A ships to B and C, and B also ships to C, C receives the same change twice — safe, no duplicates. The `syncing` flag is not a problem because each node receives changes directly from the writer, not through intermediaries.
+### Dedicated hub / star (8+ nodes)
 
-**What to build:** change `--peer` from single string to repeated flag:
+Dedicated hub relays changes between edges. Hub is **Go-only** (Pebble KV store — write-optimized LSM, no SQLite, no triggers). Edges use existing `server-mesh.*` scripts with `--peer` pointing to hub. Hub ACKs immediately, forwards asynchronously. Durable forwarding queue in Pebble survives hub crash.
+
+```
+  edge1 ──POST /sync──→ hub ──POST /sync──→ edge2
+         (changes)      │
+                        ├──→ edge3
+                        └ apply to Pebble (backup)
+```
+
+Tested and verified: Go hub + 3 Go edges (multi-writer converge), hub crash recovery (Pebble replay), cross-runtime star (Go hub + Go/Bun/Node edges). File: `go/hub/main.go`. Binary: `hook-sync-hub`. Benchmark: `bash bench-hub.sh`.
+
+## Full Mesh Scaling Limits
+
+**Why full mesh works with current protocol:** INSERT OR REPLACE with UUID PK is idempotent. If A ships to B and C, and B also ships to C, C receives the same change twice — safe, no duplicates. The `syncing` flag is not a problem because each node receives changes directly from the writer, not through intermediaries.
+
+**How it works (built):** repeated `--peer` flag, per-peer watermark in `_peer_state` table. Each peer gets only changes with `change_id > its last_acked`. Changes deleted from `_changes` only when ALL peers have ACKed (`min(last_acked)`). Offline peers' changes accumulate until they reconnect — no dead-letter for transient failures.
 
 ```bash
-./hook-sync-go -id nodeA -db a.db -listen :9001 \
+./hook-sync-mesh-go -id nodeA -db a.db -listen :9001 \
   -peer http://localhost:9002 \
   -peer http://localhost:9003 \
   -peer http://localhost:9004
 ```
-
-Ship to all peers. Each peer deduplicates via INSERT OR REPLACE. That's it.
-
 
 **Scaling formula:** the real bottleneck is not connection count, but **messages per second each node must handle**:
 
@@ -67,7 +78,6 @@ Each message ≈ 200 bytes JSON. Example with 1000 writes/sec per node:
 
 Rule of thumb: **switch to dedicated hub when (N-1) × writes/sec exceeds ~10,000 per node.** That's where SQLite WAL write contention starts to degrade.
 
-
 ## When Full Mesh Doesn't Scale: Dedicated Hub
 
 When full mesh hits the write-rate limit (see formula above), use a **dedicated hub** — a node that only relays changes, does not serve client requests.
@@ -77,7 +87,7 @@ When full mesh hits the write-rate limit (see formula above), use a **dedicated 
          (changes)      │
                         ├──→ edge3
                         ├──→ edge4
-                        └ apply to local SQLite (full backup)
+                        └ apply to Pebble KV (full backup)
 ```
 
 ### Why dedicated hub is simpler than dual-purpose hub
@@ -94,13 +104,15 @@ A dedicated hub has **no triggers at all**. All data enters via `/sync`, not loc
 | Client traffic? | Yes — competes with relay | No — pure relay |
 | What to build | Relay + work around syncing flag | Relay only |
 
-### What the hub does
+### What the hub does (built)
 
 1. **Receive `/sync`** — accept changes from any edge
-2. **Apply locally** — INSERT OR REPLACE (hub has full data copy, acts as backup)
-3. **Forward** — send raw received changes to all other edges
+2. **Apply to Pebble** — `Set("data:{id}", rowJSON)` for INSERT/UPDATE, `Delete` for DELETE (backup copy)
+3. **Enqueue durable forwards** — `Set("fwd:{n}", {batchID, changes, edgeURL})` in Pebble before ACK
+4. **ACK edge immediately** — edge deletes from its `_changes`
+5. **Forward asynchronously** — try immediate forward, background sweep retries with backoff
 
-Step 3 is the only new code. Steps 1 and 2 already work.
+All steps implemented in `go/hub/main.go`. Pebble chosen over bbolt/BadgerDB: LSM tree = write-optimized (hub workload is ~100% write ingest, no client reads).
 
 ### Hub failure
 
@@ -110,35 +122,34 @@ Hub is single point of failure. Mitigate: run hub ←→ hub-backup (point-to-po
 
 If an edge goes down and comes back, it ships all pending `_changes` to hub. Hub forwards to other edges. No data loss — same ACK + retry mechanism as point-to-point.
 
-### Hub forwarding queue (idea, not yet built)
+### Hub forwarding queue (built with Pebble)
 
-Hub ACKs edge immediately on receive, then forwards to other edges asynchronously. But if hub crashes after ACK and before forward, changes are lost. Need a **durable forwarding queue**.
+Hub ACKs edge immediately on receive, then forwards to other edges asynchronously. If hub crashes after ACK and before forward, changes survive in Pebble's durable forwarding queue → replay on restart.
 
-Since hub has no triggers and no atomicity requirement with local writes, the forwarding queue doesn't need to be SQLite. An embedded KV store is simpler and faster for append + delete by key:
+Pebble stores forwards under key `fwd:{counter}` (one entry per edge per batch). On successful forward, the entry is deleted. On restart, `forwardSweep` picks up all pending `fwd:` entries and retries.
 
 ```
 edge1 → hub receives
+      → Set("data:{id}", rowJSON) in Pebble     ← backup
+      → Set("fwd:{n}", {changes, edgeURL})       ← durable forward queue
       → ACK edge1 (edge deletes from its _changes)
-      → Put(queue_id, change_data) in KV  ← durable
       → forward to edge2/3/4
-      → each edge ACKs → Delete(queue_id) from KV
+      → each edge ACKs → Delete("fwd:{n}") from Pebble
 
 hub crash after ACK, before forward?
-  → KV still has the change
-  → restart → replay queue → forward → done
+  → Pebble still has fwd:{n}
+  → restart → forwardSweep replays → forward → done
 ```
 
-Go embedded KV options:
+**KV choice: Pebble** (cockroachdb/pebble). LSM tree = write-optimized. Hub workload is ~100% write ingest (no client reads, no `/api/items`). Pebble is Go-native, RocksDB-compatible, CockroachDB's production engine.
 
-| KV | Type | Notes |
-|-----|------|-------|
-| bbolt | B-tree | Simple, reliable, embedded in many Go projects |
-| BadgerDB | LSM tree | Optimized for writes, built for Go |
-| Pebble | LSM tree | RocksDB-compatible, CockroachDB's engine |
+| KV | Type | Chosen? | Why |
+|-----|------|---------|-----|
+| Pebble | LSM tree | ✅ Yes | Write-optimized, Go-native, production-proven (CockroachDB) |
+| bbolt | B-tree | No | Read-optimized, hub doesn't read |
+| BadgerDB | LSM tree | No | Also write-optimized, but Pebble has better tooling + CockroachDB pedigree |
 
-Hub only needs `Put(key, data)` on receive, `Delete(key)` after all edges ACK. KV is a natural fit — no SQL overhead, no schema, just a durable append-delete queue.
-
-Not yet designed or implemented. Just an idea for when hub is built.
+Verified: kill hub mid-traffic → write 5 items while hub down → restart hub → all edges converge to equal count, 0 pending, 0 dead letter.
 
 ## Multi-Region: Hierarchical
 
@@ -156,28 +167,23 @@ US hub and EU hub in full mesh (2 peers each). Edge nodes peer to regional hub o
 
 | Topology | Connections | Hops | Redundancy | SPOF | Best for |
 |----------|------------|------|------------|------|----------|
-| Point-to-point | 1 | 1 | None | No | 2 nodes (current) |
-| Full mesh | N*(N-1)/2 | 1 | N-1 paths | No | 3-7 nodes |
-| Star + relay | N-1 | 2 max | None | Hub | 8+ nodes |
+| Point-to-point | 1 | 1 | None | No | 2 nodes ✅ |
+| Full mesh | N*(N-1)/2 | 1 | N-1 paths | No | 3-7 nodes ✅ |
+| Star + relay | N-1 | 2 max | None | Hub | 8+ nodes ✅ |
 | Ring | N | N/2 avg | 1 path | No | Not recommended |
 | Chain | N-1 | N max | None | No | Not recommended |
 
 ## Implementation Priority
 
-1. **Multi-peer support** (`--peer` repeated flag) — enables full mesh for 3-7 nodes. Smallest change, highest value. Just loop over peers in ship function.
-2. **Relay mode** — enables star for 8+ nodes. Hub forwards received changes to other peers. Medium complexity.
+1. ~~**Multi-peer support** (`--peer` repeated flag)~~ ✅ **Done** — full mesh built and verified across all 3 runtimes. Per-peer watermark in `_peer_state` table. Files: `go/mesh/`, `bun/server-mesh.ts`, `node/server-mesh.js`.
+2. ~~**Relay mode**~~ ✅ **Done** — dedicated hub built with Pebble KV. Go-only (`go/hub/main.go`). Durable forwarding queue, crash recovery verified. Edges use existing `server-mesh.*` scripts.
 3. **Watermark-based pull** — nodes ask "give me changes after X" instead of push. For unreliable networks / eventual consistency at scale. Highest complexity, defer until needed.
 
-
-## Open Problems (Not Yet Solved)
+## Solved Problems
 
 ### _changes table management with multiple peers
 
-Current ACK protocol assumes 1 peer: ship → ACK → delete. With N peers in full mesh, when do we delete from `_changes`?
-
-- **Delete after all ACK:** 1 peer down → `_changes` piles up for everyone
-- **Delete after first ACK:** other peers miss the change → data loss for them
-- **Watermark per peer (proposed):** track `last_acked` per peer in `_peer_state` table. Delete only changes that ALL peers have ACKed. Changes for offline peers stay until they reconnect.
+**Solved with per-peer watermark.** Each peer has a `last_acked` entry in `_peer_state` table. Ship only sends changes with `change_id > peer's last_acked`. Delete from `_changes` only when ALL peers have ACKed (`min(last_acked)`). Offline peers' changes accumulate until they reconnect — no data loss, no dead-letter for transient failures.
 
 ```sql
 CREATE TABLE _peer_state (
@@ -186,7 +192,15 @@ CREATE TABLE _peer_state (
 );
 ```
 
-**Solution is clear, not yet implemented.** Needs to be built together with multi-peer support.
+Implemented in all 3 runtimes. Verified: 4-node mesh, 5/5 integrity PASS, 1000 items per node, 0 pending, 0 dead letter.
+
+### Hub forwarding queue durability
+
+**Solved with Pebble KV store.** Hub ACKs edge immediately, then forwards asynchronously. If hub crashes after ACK but before forward, the forwarding entry (`fwd:{n}`) survives in Pebble → replay on restart. No data loss.
+
+Implemented in `go/hub/main.go`. Verified: kill hub mid-traffic → write 5 items → restart → all edges converge, 0 pending, 0 dead letter.
+
+## Open Problems (Not Yet Solved)
 
 ### Multi-hub loop prevention
 

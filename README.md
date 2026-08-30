@@ -1,6 +1,6 @@
 # hook-sync
 
-Multi-language SQLite replication prototype. Change capture via SQLite triggers + `_changes` table, ACK-based batched HTTP sync, UUID primary keys. Go, Bun, and Node implementations speak the same wire protocol and sync to each other.
+Multi-language SQLite replication prototype. Change capture via SQLite triggers + `_changes` table, ACK-based batched HTTP sync, UUID primary keys. Go, Bun, and Node implementations speak the same wire protocol and sync to each other. Supports point-to-point (2 nodes), full mesh (3-7 nodes), and dedicated hub / star (8+ nodes) topologies.
 
 ## How It Works
 
@@ -13,6 +13,8 @@ App write (native SQLite speed)
   → Peer returns {applied, ack: batch_id}
   → Sender deletes from _changes only after ACK confirms
 ```
+
+In full mesh mode, the sender ships to all peers concurrently. Each peer has its own watermark (`_peer_state` table) — changes are deleted from `_changes` only after ALL peers have ACKed. Offline peers' changes accumulate until they reconnect.
 
 Sync runs in the background — it does not block the write path. The client gets its response as soon as SQLite write + capture completes.
 
@@ -39,17 +41,27 @@ Multi-writer without UUID = data loss. Integer auto-increment collides across no
 ```
 hook-sync/
 ├── PROTOCOL.md               # Wire protocol spec
+├── TOPOLOGY.md               # Topology recommendations (point-to-point, full mesh, hub)
 ├── go/                       # Go implementation (Fiber + mattn/go-sqlite3)
-│   ├── main.go               #   single-table
-│   ├── multi/main.go         #   multi-table (items + categories)
+│   ├── main.go               #   single-table, point-to-point
+│   ├── mesh/main.go          #   full mesh (multi-peer, per-peer watermark)
+│   ├── hub/main.go          #   dedicated hub (Pebble KV, star topology relay)
+│   ├── multitable/main.go    #   multi-table (items + categories)
 │   └── bench/                #   direct SQLite benchmarks
 ├── bun/                      # Bun implementation (Bun.serve + bun:sqlite)
-│   ├── server.ts             #   single-table
-│   └── server-multi.ts       #   multi-table
+│   ├── server.ts             #   single-table, point-to-point
+│   ├── server-mesh.ts        #   full mesh (multi-peer, per-peer watermark)
+│   └── server-multitable.ts  #   multi-table
 ├── node/                     # Node.js implementation (hyper-express + better-sqlite3)
-│   ├── server.js             #   single-table
-│   └── server-multi.js       #   multi-table
-├── bench-dual-ack.sh         # Dual-writer benchmark (all 3 runtimes)
+│   ├── server.js             #   single-table, point-to-point
+│   ├── server-mesh.js        #   full mesh (multi-peer, per-peer watermark)
+│   └── server-multitable.js  #   multi-table
+├── bench-dual-ack.sh         # Dual-writer benchmark, point-to-point (all 3 runtimes)
+├── bench-fullmesh.sh         # Full mesh benchmark, 4 nodes all-to-all (all 3 runtimes)
+├── bench-hub.sh             # Dedicated hub benchmark, 1 hub + 3 edges (all 3 runtimes)
+├── hook-sync-go              # Go binary (point-to-point, single-table)
+├── hook-sync-mesh-go         # Go binary (full mesh, multi-peer)
+├── hook-sync-hub             # Go binary (dedicated hub, Pebble KV)
 ├── bench-hsync.js            # HTTP benchmark client
 ├── bench-interval.js         # Batch interval optimization
 ├── bench-trigger-overhead.ts # Trigger overhead measurement
@@ -101,6 +113,60 @@ bun run bun/server.ts --id bun1 --db bun1.db --listen :9002 --peer http://localh
 
 Both nodes sync bidirectionally — same wire protocol, same ACK-based reliability.
 
+### Full mesh (multi-peer)
+
+Full mesh topology: every node ships changes to all other nodes directly. Uses per-peer watermarks (`_peer_state` table) — changes are deleted from `_changes` only after ALL peers have ACKed. Offline peers' changes accumulate until they reconnect.
+
+```bash
+# Go — build mesh binary
+cd go && go build -o ../hook-sync-mesh-go ./mesh
+
+# 4-node full mesh (repeat --peer for each neighbor)
+./hook-sync-mesh-go -id nodeA -db a.db -listen :9001 \
+  -peer http://localhost:9002 \
+  -peer http://localhost:9003 \
+  -peer http://localhost:9004
+
+# Bun
+bun run bun/server-mesh.ts --id nodeB --db b.db --listen :9002 \
+  --peer http://localhost:9001 \
+  --peer http://localhost:9003 \
+  --peer http://localhost:9004
+
+# Node
+node node/server-mesh.js --id nodeC --db c.db --listen :9003 \
+  --peer http://localhost:9001 \
+  --peer http://localhost:9002 \
+  --peer http://localhost:9004
+```
+
+Cross-runtime mesh works — Go, Bun, and Node nodes sync to each other in the same mesh. See [TOPOLOGY.md](TOPOLOGY.md) for scaling limits and hub topology design.
+
+Benchmark: `bash bench-fullmesh.sh` — 4 nodes, all-to-all, all 3 runtimes.
+
+### Dedicated hub (star topology, 8+ nodes)
+
+Dedicated hub for star topology. Hub is **Go-only** (Pebble KV store, write-optimized LSM). No SQLite, no triggers, no `/api/items` — pure relay + backup. All data enters via `/sync`. Pebble stores backup (`data:{id}`) and durable forwarding queue (`fwd:{n}`). Hub ACKs edge immediately, forwards to other edges asynchronously. If hub crashes after ACK, forwarding queue survives in Pebble → replay on restart.
+
+Edge nodes use the existing `server-mesh.*` scripts — hub is just a peer via `--peer http://localhost:9010`. No edge script changes needed.
+
+```bash
+# Build hub binary
+cd go && go build -o ../hook-sync-hub ./hub
+
+# Hub (1 process, Go-only)
+./hook-sync-hub -id hub1 -listen :9010 -db hub1.pebble \
+  -edge http://localhost:9001 \
+  -edge http://localhost:9002 \
+  -edge http://localhost:9003 \
+  -edge http://localhost:9004
+
+# Edges (existing mesh scripts, peer to hub only)
+./hook-sync-mesh-go -id edge1 -db e1.db -listen :9001 -peer http://localhost:9010 -batch-ms 50
+bun run bun/server-mesh.ts --id edge2 --db e2.db --listen :9002 --peer http://localhost:9010 --batch-ms 50
+node node/server-mesh.js --id edge3 --db e3.db --listen :9003 --peer http://localhost:9010 --batch-ms 50
+```
+
 ## API
 
 See [PROTOCOL.md](PROTOCOL.md) for full spec.
@@ -113,7 +179,14 @@ See [PROTOCOL.md](PROTOCOL.md) for full spec.
 | `PUT` | `/api/items/:id` | Update item |
 | `DELETE` | `/api/items/:id` | Delete item |
 | `POST` | `/sync` | Receive change batch with ACK (internal) |
-| `GET` | `/health` | Health + item count + pending changes + dead letter count |
+| `GET` | `/health` | Health + item count + pending changes + dead letter count + per-peer watermarks (mesh) |
+
+**Hub API** (dedicated hub only — no `/api/items` endpoints):
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/sync` | Receive change batch, ACK immediately, forward to other edges |
+| `GET` | `/health` | Hub status: backup item count, pending forwards, edge list |
 
 ## Benchmark Results
 
@@ -130,6 +203,30 @@ All benchmarks on Mac M4. Each runtime tested independently — no cross-runtime
 200 concurrent writes per run (100 to each node). Integrity: both nodes have equal item count, 0 pending changes, 0 dead letter after each run.
 
 Localhost HTTP variance is high (3-8x across runs). Median is the reliable metric, not min/max.
+
+### Full mesh throughput (4 nodes all-to-all, 5 runs × 50 req per node, localhost)
+
+| Runtime | QPS median | QPS min | QPS max | Integrity |
+|---------|--------:|--------:|--------:|:---------:|
+| Go | 14,853 | 6,108 | 23,570 | 5/5 PASS |
+| Node | 14,414 | 3,165 | 18,487 | 5/5 PASS |
+| Bun | 13,175 | 1,872 | 18,887 | 5/5 PASS |
+
+200 concurrent writes per run (50 to each of 4 nodes). Integrity: all 4 nodes have equal item count (1000 per node), 0 pending changes, 0 dead letter after each run. Cross-runtime mesh (Go+Bun+Node+Go) also verified — all nodes converge.
+
+Benchmark script: `bash bench-fullmesh.sh`
+
+### Dedicated hub throughput (1 Go hub + 3 edges, star, 5 runs × 50 req per edge, localhost)
+
+| Runtime (edges) | QPS median | QPS min | QPS max | Integrity |
+|---------|--------:|--------:|--------:|:---------:|
+| Go | 16,268 | 5,706 | 17,516 | 5/5 PASS |
+| Bun | 19,750 | 12,931 | 27,683 | 5/5 PASS |
+| Node | 13,193 | 148 | 21,660 | 5/5 PASS |
+
+150 concurrent writes per run (50 to each of 3 edges). Integrity: all 3 edges have equal item count (750 per edge), hub backup count matches edges, 0 pending changes, 0 pending forwards, 0 dead letter after each run. Hub is always Go (Pebble KV).
+
+Benchmark script: `bash bench-hub.sh`
 
 ### Direct SQLite (10K writes, no HTTP)
 
@@ -173,12 +270,17 @@ Tested: peer unreachable → 5 retries with backoff → changes moved to `_dead_
 - Integrity: 10/10 runs PASS (2000 items per node, 0 pending, 0 dead letter) ✅
 - Sync does not block write path ✅
 - Idle = zero traffic (timer no-op on empty `_changes`) ✅
+- Full mesh: 4 nodes all-to-all, per-peer watermark, all 3 runtimes ✅ (5/5 integrity PASS, 1000 items/node)
+- Cross-runtime mesh: Go + Bun + Node + Go in same mesh ✅
+- Per-peer watermark: offline peers' changes accumulate, no data loss on reconnect ✅
+- Dedicated hub (Pebble KV): Go hub + 3 Go edges, star topology, multi-writer converge ✅
+- Hub crash recovery: kill hub mid-traffic → Pebble fwd queue survives → restart → all edges converge ✅
+- Cross-runtime star: Go hub + Go/Bun/Node edges, all converge, 0 pending, 0 dead letter ✅
 
 ## Limitations (prototype)
 
-- **Multi-table requires manual setup** — adding a table means writing triggers + updating applyChanges dispatch (see `go/multi/`, `bun/server-multi.ts`, `node/server-multi.js` for 2-table example)
-- **Hardcoded columns** — column names mapped by index in triggers
-- **Point-to-point** — no topology management (star, mesh, etc.)
+- **No multi-region topology** — point-to-point, full mesh, and dedicated hub all work. Multi-region (hubs in full mesh) not yet built — needs origin tracking for loop prevention (see [TOPOLOGY.md](TOPOLOGY.md))
+- **Multi-table requires manual setup** — adding a table means writing triggers + updating applyChanges dispatch (see `go/multitable/`, `bun/server-multitable.ts`, `node/server-multitable.js` for 2-table example)
 - **Localhost benchmark variance** — HTTP throughput varies 3-8x on localhost; use real network for reliable comparison
 
 ## License

@@ -20,7 +20,9 @@ const PEER_URL = getArg("peer", "");
 const BATCH_MS = parseInt(getArg("batch-ms", "50"));
 
 if (!ID || !DB_PATH || !LISTEN) {
-	console.error("usage: node server-multi.js --id node1 --db node1.db --listen :9001 --peer http://localhost:9002 --batch-ms 50");
+	console.error(
+		"usage: node server-multi.js --id node1 --db node1.db --listen :9001 --peer http://localhost:9002 --batch-ms 50",
+	);
 	process.exit(1);
 }
 
@@ -121,25 +123,49 @@ db.exec(`
 `);
 
 // --- Precompile statements ---
-const stmtInsertItem = db.prepare("INSERT INTO items(id, name, value, created_at, updated_at, node_id) VALUES(?, ?, ?, ?, ?, ?)");
-const stmtReplaceItem = db.prepare("INSERT OR REPLACE INTO items(id, name, value, created_at, updated_at, node_id) VALUES(?, ?, ?, ?, ?, ?)");
+const stmtInsertItem = db.prepare(
+	"INSERT INTO items(id, name, value, created_at, updated_at, node_id) VALUES(?, ?, ?, ?, ?, ?)",
+);
+const stmtReplaceItem = db.prepare(
+	"INSERT OR REPLACE INTO items(id, name, value, created_at, updated_at, node_id) VALUES(?, ?, ?, ?, ?, ?)",
+);
 const stmtDeleteItem = db.prepare("DELETE FROM items WHERE id = ?");
-const stmtListItems = db.prepare("SELECT id, name, value, created_at, updated_at, node_id FROM items ORDER BY created_at DESC LIMIT 100");
+const stmtListItems = db.prepare(
+	"SELECT id, name, value, created_at, updated_at, node_id FROM items ORDER BY created_at DESC LIMIT 100",
+);
 
-const stmtInsertCat = db.prepare("INSERT INTO categories(id, name, parent_id, created_at, node_id) VALUES(?, ?, ?, ?, ?)");
-const stmtReplaceCat = db.prepare("INSERT OR REPLACE INTO categories(id, name, parent_id, created_at, node_id) VALUES(?, ?, ?, ?, ?)");
+const stmtInsertCat = db.prepare(
+	"INSERT INTO categories(id, name, parent_id, created_at, node_id) VALUES(?, ?, ?, ?, ?)",
+);
+const stmtReplaceCat = db.prepare(
+	"INSERT OR REPLACE INTO categories(id, name, parent_id, created_at, node_id) VALUES(?, ?, ?, ?, ?)",
+);
 const stmtDeleteCat = db.prepare("DELETE FROM categories WHERE id = ?");
-const stmtListCats = db.prepare("SELECT id, name, parent_id, created_at, node_id FROM categories ORDER BY created_at DESC LIMIT 100");
+const stmtListCats = db.prepare(
+	"SELECT id, name, parent_id, created_at, node_id FROM categories ORDER BY created_at DESC LIMIT 100",
+);
 
-const stmtChanges = db.prepare("SELECT change_id, table_name, op, row_id, row_data FROM _changes ORDER BY change_id LIMIT 100");
-const stmtDeleteChanges = db.prepare("DELETE FROM _changes WHERE change_id <= ?");
-const stmtSyncOn = db.prepare("UPDATE _meta SET value = 1 WHERE key = 'syncing'");
-const stmtSyncOff = db.prepare("UPDATE _meta SET value = 0 WHERE key = 'syncing'");
-const stmtDeadLetter = db.prepare("INSERT INTO _dead_letter(table_name, op, row_id, row_data, failed_at, retry_count) VALUES(?, ?, ?, ?, ?, ?)");
+const stmtChanges = db.prepare(
+	"SELECT change_id, table_name, op, row_id, row_data FROM _changes ORDER BY change_id LIMIT 100",
+);
+const stmtDeleteChanges = db.prepare(
+	"DELETE FROM _changes WHERE change_id <= ?",
+);
+const stmtSyncOn = db.prepare(
+	"UPDATE _meta SET value = 1 WHERE key = 'syncing'",
+);
+const stmtSyncOff = db.prepare(
+	"UPDATE _meta SET value = 0 WHERE key = 'syncing'",
+);
+const stmtDeadLetter = db.prepare(
+	"INSERT INTO _dead_letter(table_name, op, row_id, row_data, failed_at, retry_count) VALUES(?, ?, ?, ?, ?, ?)",
+);
 const stmtItemCount = db.prepare("SELECT COUNT(*) as count FROM items");
 const stmtCatCount = db.prepare("SELECT COUNT(*) as count FROM categories");
 const stmtPendingChanges = db.prepare("SELECT COUNT(*) as count FROM _changes");
-const stmtDeadLetterCount = db.prepare("SELECT COUNT(*) as count FROM _dead_letter");
+const stmtDeadLetterCount = db.prepare(
+	"SELECT COUNT(*) as count FROM _dead_letter",
+);
 
 // --- Batch ship (ACK-based) ---
 async function shipBatch(batchId, changes) {
@@ -184,12 +210,21 @@ setInterval(() => {
 					return;
 				}
 				if (attempt < BACKOFF_MS.length - 1) {
-					await new Promise((resolve) => setTimeout(resolve, BACKOFF_MS[attempt]));
+					await new Promise((resolve) =>
+						setTimeout(resolve, BACKOFF_MS[attempt]),
+					);
 				}
 			}
 			const now = Date.now();
 			for (const r of rows) {
-				stmtDeadLetter.run(r.table_name, r.op, r.row_id, r.row_data, now, BACKOFF_MS.length);
+				stmtDeadLetter.run(
+					r.table_name,
+					r.op,
+					r.row_id,
+					r.row_data,
+					now,
+					BACKOFF_MS.length,
+				);
 			}
 			stmtDeleteChanges.run(batchId);
 		} finally {
@@ -208,7 +243,14 @@ const applyChanges = db.transaction((changes) => {
 				if (c.op === "INSERT" || c.op === "UPDATE") {
 					if (!c.row) continue;
 					const r = c.row;
-					stmtReplaceItem.run(r.id, r.name, r.value, r.created_at, r.updated_at, r.node_id);
+					stmtReplaceItem.run(
+						r.id,
+						r.name,
+						r.value,
+						r.created_at,
+						r.updated_at,
+						r.node_id,
+					);
 					applied++;
 				} else if (c.op === "DELETE") {
 					if (!c.old_id) continue;
@@ -219,7 +261,13 @@ const applyChanges = db.transaction((changes) => {
 				if (c.op === "INSERT" || c.op === "UPDATE") {
 					if (!c.row) continue;
 					const r = c.row;
-					stmtReplaceCat.run(r.id, r.name, r.parent_id, r.created_at, r.node_id);
+					stmtReplaceCat.run(
+						r.id,
+						r.name,
+						r.parent_id,
+						r.created_at,
+						r.node_id,
+					);
 					applied++;
 				} else if (c.op === "DELETE") {
 					if (!c.old_id) continue;
@@ -257,7 +305,13 @@ app.post("/api/items", async (req, res) => {
 		const id = crypto.randomUUID();
 		const now = Date.now();
 		stmtInsertItem.run(id, body.name, body.value, now, now, ID);
-		res.json({ id, name: body.name, value: body.value, created_at: now, node_id: ID });
+		res.json({
+			id,
+			name: body.name,
+			value: body.value,
+			created_at: now,
+			node_id: ID,
+		});
 	} catch (e) {
 		res.status(500).json({ error: e.message });
 	}
@@ -273,7 +327,13 @@ app.post("/api/categories", async (req, res) => {
 		const id = crypto.randomUUID();
 		const now = Date.now();
 		stmtInsertCat.run(id, body.name, body.parent_id ?? null, now, ID);
-		res.json({ id, name: body.name, parent_id: body.parent_id ?? null, created_at: now, node_id: ID });
+		res.json({
+			id,
+			name: body.name,
+			parent_id: body.parent_id ?? null,
+			created_at: now,
+			node_id: ID,
+		});
 	} catch (e) {
 		res.status(500).json({ error: e.message });
 	}
@@ -284,12 +344,22 @@ app.get("/health", (req, res) => {
 	const { count: categories } = stmtCatCount.get();
 	const { count: pendingChanges } = stmtPendingChanges.get();
 	const { count: deadLetter } = stmtDeadLetterCount.get();
-	res.json({ ok: true, node_id: ID, items, categories, pending_changes: pendingChanges, dead_letter: deadLetter });
+	res.json({
+		ok: true,
+		node_id: ID,
+		items,
+		categories,
+		pending_changes: pendingChanges,
+		dead_letter: deadLetter,
+	});
 });
 
-app.listen(parseInt(LISTEN.replace(":", "")))
+app
+	.listen(parseInt(LISTEN.replace(":", "")))
 	.then(() => {
-		console.log(`[${ID}] listening on ${LISTEN}, peer=${PEER_URL}, batch=${BATCH_MS}ms (multi-table)`);
+		console.log(
+			`[${ID}] listening on ${LISTEN}, peer=${PEER_URL}, batch=${BATCH_MS}ms (multi-table)`,
+		);
 	})
 	.catch((e) => {
 		console.error(`[${ID}] failed to listen:`, e);
