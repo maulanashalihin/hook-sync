@@ -128,6 +128,7 @@ let shipping = false;
 
 // Poll _changes every BATCH_MS — delete only after ACK confirms receipt
 setInterval(() => {
+if (!PEER_URL) return; // no peer — keep changes in _changes for when peer is configured
 	if (shipping) return;
 	const rows = stmtChanges.all() as { change_id: number; op: string; row_id: string; row_data: string | null }[];
 	if (rows.length === 0) return;

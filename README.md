@@ -61,7 +61,7 @@ When the network splits and both nodes accept writes independently, hook-sync us
 | UPDATE same row | Node A: value=100, Node B: value=200 | Converge to higher `updated_at` | Older update dropped |
 | DELETE vs UPDATE | Node A deletes, Node B updates | UPDATE wins if newer than delete | Delete intent dropped |
 
-Both nodes always converge to the same state. No divergence, no silent corruption. Tested: `bash bench-splitbrain.sh` — 12/12 PASS.
+Both nodes always converge to the same state. No divergence, no silent corruption. Tested across all 3 runtimes: `bash bench-splitbrain.sh` — 36/36 PASS (Go 12/12, Bun 12/12, Node 12/12).
 
 ### ACK-based reliability
 
@@ -307,7 +307,7 @@ Tested: peer unreachable → 5 retries with backoff → changes moved to `_dead_
 
 ### Split-brain safety
 
-Tested: `bash bench-splitbrain.sh` — 12/12 PASS.
+Tested across all 3 runtimes: `bash bench-splitbrain.sh` — 36/36 PASS (Go 12/12, Bun 12/12, Node 12/12).
 
 | Scenario | Result |
 |----------|--------|
@@ -341,6 +341,32 @@ At equal durability, raw write throughput is tied in single-write mode (HTTP ove
 
 Full report: [BENCHMARK-REPORT.md](BENCHMARK-REPORT.md)
 
+### Run your own benchmarks
+
+All benchmarks are shell scripts that start servers, run tests, and verify data integrity. Each runtime (Go, Bun, Node) is tested independently — servers are stopped and restarted between runtimes.
+
+```bash
+# Run ALL benchmarks in one command (all topologies, all runtimes)
+bash bench-all.sh
+
+# Or run individual benchmarks:
+bash bench-dual-ack.sh       # Point-to-point: 2 nodes, dual-writer throughput
+bash bench-fullmesh.sh       # Full mesh: 4 nodes, all-to-all sync
+bash bench-hub.sh            # Dedicated hub: 1 Go hub + 3 edges (star)
+bash bench-splitbrain.sh     # Split-brain safety: partition, conflict, reconnect
+
+# Test a single runtime for split-brain:
+bash bench-splitbrain.sh go   # or: bun, node
+```
+
+Each benchmark:
+- Starts servers, waits for readiness, runs N iterations
+- Verifies data integrity after each iteration (item count, pending changes, dead letter)
+- Reports QPS (min/median/max) and integrity PASS/FAIL
+- Cleans up all processes and DB files between runtimes
+
+**Prerequisites**: Go 1.21+, Bun, Node.js with `npm install` in `node/`.
+
 ## Verified
 
 - Go ↔ Go, Go ↔ Bun, Go ↔ Node, Bun ↔ Node bidirectional sync ✅
@@ -361,7 +387,7 @@ Full report: [BENCHMARK-REPORT.md](BENCHMARK-REPORT.md)
 - Batch scaling: hook-sync plateaus at 31K QPS, Postgres degrades at batch 10K ✅
 - Convergence: 100K items in 2s (batch-size 10000 + drain mode), zero data loss ✅
 - Sync overhead: ~0% (with peer vs without peer = noise) ✅
-- Split-brain: INSERT/UPDATE/DELETE conflicts converge, 12/12 PASS ✅
+- Split-brain: INSERT/UPDATE/DELETE conflicts converge, 36/36 PASS across all 3 runtimes ✅
 - Connection error retry: peer unreachable → no dead letter, retry next tick ✅
 
 ## Implement in Your Language
