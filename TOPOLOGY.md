@@ -168,6 +168,7 @@ US hub and EU hub in full mesh (2 peers each). Edge nodes peer to regional hub o
 2. **Relay mode** — enables star for 8+ nodes. Hub forwards received changes to other peers. Medium complexity.
 3. **Watermark-based pull** — nodes ask "give me changes after X" instead of push. For unreliable networks / eventual consistency at scale. Highest complexity, defer until needed.
 
+
 ## Open Problems (Not Yet Solved)
 
 ### _changes table management with multiple peers
@@ -185,13 +186,21 @@ CREATE TABLE _peer_state (
 );
 ```
 
-Not yet implemented. Needs to be built together with multi-peer support.
+**Solution is clear, not yet implemented.** Needs to be built together with multi-peer support.
 
-### Relay mode: duplicate forwarding
+### Multi-hub loop prevention
 
-In star topology, hub forwards received changes to other edges. If edge1 and edge2 both write, hub receives both, forwards both. But if hub also has full mesh with another hub, same change can loop. Need a "seen" set or origin tracking to prevent forwarding changes back to the node they came from.
+Dedicated hub design solves duplicate forwarding for single-hub topology — hub receives from edges, forwards to edges, no loop possible.
 
-Not yet designed.
+But in multi-region setup (hubs in full mesh), hub A forwards to hub B, hub B forwards back to hub A → infinite loop. Need **origin tracking**: each change carries `origin_node_id`. Hub skips forwarding back to the node it came from.
+
+```
+edge1 → hub A (origin=edge1) → hub B
+hub B sees origin=edge1, NOT hub A → forwards to edge3, edge4
+hub B does NOT forward back to hub A (origin=edge1, not hubA)
+```
+
+Not yet designed in detail. Only relevant when multi-region is built.
 
 ## What NOT to Do
 
