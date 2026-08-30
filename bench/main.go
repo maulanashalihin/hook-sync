@@ -73,7 +73,7 @@ func main() {
 
 		start := time.Now()
 		for i := 0; i < n; i++ {
-			id := uuid.New().String()
+			id, _ := uuid.NewV7()
 			now := time.Now().UnixMilli()
 			_, err := db.Exec(
 				"INSERT INTO items(id, name, value, created_at, updated_at, node_id) VALUES(?, ?, ?, ?, ?, ?)",
@@ -105,7 +105,7 @@ func main() {
 		start := time.Now()
 		tx, _ := db.Begin()
 		for i := 0; i < n; i++ {
-			id := uuid.New().String()
+			id, _ := uuid.NewV7()
 			now := time.Now().UnixMilli()
 			tx.Exec(
 				"INSERT INTO items(id, name, value, created_at, updated_at, node_id) VALUES(?, ?, ?, ?, ?, ?)",

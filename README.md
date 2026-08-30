@@ -30,11 +30,19 @@ Unlike `sqlite3_update_hook` (which only gives rowid), `sqlite3_preupdate_hook` 
 
 Hook fires before INSERT/UPDATE/DELETE on all tables (including `WITHOUT ROWID`). Built into SQLite core — requires `SQLITE_ENABLE_PREUPDATE_HOOK` compile flag.
 
-### UUID primary keys
+### UUIDv7 primary keys
 
-UUID PKs eliminate conflicts in multi-writer setups — no last-write-wins, no CRDT, no vector clocks. Each node generates independent UUIDs that never collide.
+UUIDv7 PKs eliminate conflicts in multi-writer setups — no last-write-wins, no CRDT, no vector clocks. Each node generates independent UUIDs that never collide.
 
-> **Performance note:** Random UUIDv4 as PK causes B-tree page splits (10-16x slower inserts). Use **UUIDv7** (time-ordered) for production to maintain sequential insert ordering. This prototype uses UUIDv4 for simplicity.
+UUIDv7 is time-ordered (RFC 9562), so inserts are sequential in the B-tree — append-like, no page splits. Benchmarked vs UUIDv4:
+
+| Writes | UUIDv4 QPS | UUIDv7 QPS | UUIDv7 advantage |
+|-------:|-----------:|-----------:|----------------:|
+| 1,000 | 29,992 | 38,792 | 1.3x |
+| 10,000 | 39,690 | 41,396 | 1.0x |
+| 100,000 | 19,365 | 39,850 | **2.1x** |
+
+UUIDv4 random inserts cause B-tree page splits at scale — QPS drops 50% at 100K writes. UUIDv7 stays stable.
 
 ### Infinite loop prevention
 

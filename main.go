@@ -323,17 +323,18 @@ func (n *Node) startHTTP() {
 			return c.Status(400).JSON(fiber.Map{"error": err.Error()})
 		}
 
-		id := uuid.New().String()
+		id, _ := uuid.NewV7()
+		idStr := id.String()
 		now := time.Now().UnixMilli()
 		_, err := n.db.Exec(
 			"INSERT INTO items(id, name, value, created_at, updated_at, node_id) VALUES(?, ?, ?, ?, ?, ?)",
-			id, body.Name, body.Value, now, now, n.ID,
+			idStr, body.Name, body.Value, now, now, n.ID,
 		)
 		if err != nil {
 			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
 		}
 		return c.JSON(map[string]any{
-			"id": id, "name": body.Name, "value": body.Value,
+			"id": idStr, "name": body.Name, "value": body.Value,
 			"created_at": now, "node_id": n.ID,
 		})
 	})
