@@ -1,6 +1,6 @@
 # hook-sync
 
-Multi-language SQLite replication prototype. Change capture via SQLite triggers + `_changes` table, ACK-based batched HTTP sync, UUID primary keys. Go, Bun, and Node implementations speak the same wire protocol and sync to each other. Supports point-to-point (2 nodes), full mesh (3-7 nodes), and dedicated hub / star (8+ nodes) topologies.
+Multi-language SQLite replication. Change capture via SQLite triggers + `_changes` table, ACK-based batched HTTP sync, UUID primary keys. Go, Bun, and Node implementations speak the same wire protocol and sync to each other. Supports point-to-point (2 nodes), full mesh (3-7 nodes), and dedicated hub / star (8+ nodes) topologies.
 
 ## How It Works
 
@@ -277,7 +277,7 @@ Tested: peer unreachable → 5 retries with backoff → changes moved to `_dead_
 - Hub crash recovery: kill hub mid-traffic → Pebble fwd queue survives → restart → all edges converge ✅
 - Cross-runtime star: Go hub + Go/Bun/Node edges, all converge, 0 pending, 0 dead letter ✅
 
-## Limitations (prototype)
+## Limitations
 
 - **No multi-region topology** — point-to-point, full mesh, and dedicated hub all work. Multi-region (hubs in full mesh) not yet built — needs origin tracking for loop prevention (see [TOPOLOGY.md](TOPOLOGY.md))
 - **Multi-table requires manual setup** — adding a table means writing triggers + updating applyChanges dispatch (see `go/multitable/`, `bun/server-multitable.ts`, `node/server-multitable.js` for 2-table example)
