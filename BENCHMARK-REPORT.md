@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-30
 **Stack:** Go 1.26 + Fiber + mattn/go-sqlite3, Node 22 + hyper-express + better-sqlite3, Bun 1.4 + Bun.serve + bun:sqlite
-**Environment:** Mac M4, 2 nodes per runtime on localhost, 50ms batch interval
+**Environment:** Mac M4 (localhost), 2-4 nodes per runtime depending on topology, 50ms batch interval, batch-size 10000
 **Methodology:** Each runtime tested independently. All processes stopped before each run. No cross-runtime traffic during testing.
 
 ---
@@ -11,11 +11,9 @@
 
 10 runs × 100 concurrent requests per node (200 total per run). Both nodes receive writes simultaneously. Integrity checked after each run.
 
-| Runtime | QPS median | QPS min | QPS max | Integrity |
-|---------|--------:|--------:|--------:|:---------:|
-| Go | 15,116 | 3,698 | 18,366 | 10/10 PASS |
-| Node | 11,496 | 5,251 | 14,416 | 10/10 PASS |
-| Bun | 4,904 | 1,947 | 14,888 | 10/10 PASS |
+| Go | 9,149 | 3,705 | 15,063 | 10/10 PASS |
+| Bun | 10,476 | 3,004 | 14,159 | 10/10 PASS |
+| Node | 8,393 | 3,458 | 10,068 | 10/10 PASS |
 
 Integrity criteria: both nodes have equal item count, 0 pending changes, 0 dead letter after sync settles.
 
@@ -62,6 +60,8 @@ Having a peer does not slow down writes. Sync runs in a separate timer + HTTP PO
 | Bun | 8,099 QPS | 8,578 QPS | +6% (noise) |
 | Node | 14,764 QPS | 14,701 QPS | -0.4% (noise) |
 
+
+*Data measured prior to bench script consolidation. Behavior unchanged — sync still runs in background timer, decoupled from write path.*
 ---
 
 ## Sync Delay = Batch Interval
@@ -73,6 +73,8 @@ Having a peer does not slow down writes. Sync runs in a separate timer + HTTP PO
 | 100ms | 100ms | 22ms | Conservative |
 
 Burst sync is constant ~20-25ms regardless of interval — batch threshold (100 changes) triggers immediate ship, bypassing the ticker.
+
+*Data measured prior to bench script consolidation. Behavior unchanged — sync delay is still determined by batch interval timer.*
 
 ---
 
@@ -194,22 +196,25 @@ Tested with Go ↔ Go:
 
 ## Dead Letter Queue
 
+Dead letter is reserved for **ACK mismatch** (protocol error) only. Connection errors (peer unreachable) never dead-letter — changes stay in `_changes` and retry every tick until peer reconnects.
+
 Tested with Go, peer unreachable (port 9999 nothing listening):
 
 1. Write 5 items to node A
 2. Ship attempts fail: retry 1 (50ms) → retry 2 (100ms) → retry 3 (200ms) → retry 4 (400ms) → retry 5 (800ms)
-3. After 5 failures: 5 rows in `_dead_letter`, 0 in `_changes`
-4. `/health` reports `dead_letter: 5, pending_changes: 0`
+3. After 5 connection failures: changes stay in `_changes` (NOT dead-lettered), retry next tick
+4. `/health` reports `dead_letter: 0, pending_changes: 5`
+5. Start peer on port 9999 → next tick ships successfully → both nodes converge
 
-**Result: PASS.** Failed ships move to `_dead_letter` table for manual review. Pending changes cleared.
+**Result: PASS.** Connection errors retry indefinitely — no data loss, no dead letter. Only ACK mismatch (peer returns wrong batch_id) moves to `_dead_letter`.
 
 ---
 
 ## Cross-Server: hook-sync vs Postgres (100K writes, real network)
 
 **Date:** 2026-08-30
-**Servers:** OVH (Canada, Intel Haswell 6 vCPU, 11GB) + 1TIM (Asia, AMD EPYC 6 vCPU, 11GB)
-**Network:** ~2-4ms RTT between servers
+**Servers:** OVH (Singapore, Intel Haswell 6 vCPU, 11GB) + 1TIM (Singapore, AMD EPYC 6 vCPU, 11GB)
+**Network:** 2.7ms RTT between servers, 289 Mbps single stream (iperf3)
 **Methodology:** Same Go HTTP client, concurrency 10, 10 runs × 10,000 = 100,000 writes. Both systems with active replication cross-server. Apples-to-apples: both via HTTP API (`POST /api/items`), same JSON schema, same UUID PK.
 
 ### Setup
