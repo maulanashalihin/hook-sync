@@ -95,6 +95,36 @@ Hub is single point of failure. Mitigate: run hub ←→ hub-backup (point-to-po
 
 If an edge goes down and comes back, it ships all pending `_changes` to hub. Hub forwards to other edges. No data loss — same ACK + retry mechanism as point-to-point.
 
+### Hub forwarding queue (idea, not yet built)
+
+Hub ACKs edge immediately on receive, then forwards to other edges asynchronously. But if hub crashes after ACK and before forward, changes are lost. Need a **durable forwarding queue**.
+
+Since hub has no triggers and no atomicity requirement with local writes, the forwarding queue doesn't need to be SQLite. An embedded KV store is simpler and faster for append + delete by key:
+
+```
+edge1 → hub receives
+      → ACK edge1 (edge deletes from its _changes)
+      → Put(queue_id, change_data) in KV  ← durable
+      → forward to edge2/3/4
+      → each edge ACKs → Delete(queue_id) from KV
+
+hub crash after ACK, before forward?
+  → KV still has the change
+  → restart → replay queue → forward → done
+```
+
+Go embedded KV options:
+
+| KV | Type | Notes |
+|-----|------|-------|
+| bbolt | B-tree | Simple, reliable, embedded in many Go projects |
+| BadgerDB | LSM tree | Optimized for writes, built for Go |
+| Pebble | LSM tree | RocksDB-compatible, CockroachDB's engine |
+
+Hub only needs `Put(key, data)` on receive, `Delete(key)` after all edges ACK. KV is a natural fit — no SQL overhead, no schema, just a durable append-delete queue.
+
+Not yet designed or implemented. Just an idea for when hub is built.
+
 ## Multi-Region: Hierarchical
 
 Regional hubs in full mesh. Edge nodes star to regional hub.
