@@ -131,29 +131,41 @@ See [PROTOCOL.md](PROTOCOL.md) for full spec. All implementations expose:
 
 ## Benchmark Results
 
-> **Note:** Go benchmarked on localhost (0ms RTT). cr-sqlite benchmarked via public internet (35-40ms RTT). Full report: [BENCHMARK-REPORT.md](BENCHMARK-REPORT.md).
+All benchmarks run on Mac M4, 2 nodes on localhost, 50ms batch interval.
 
-### Write Throughput (100 concurrent requests)
+### Bun vs Go — Write Throughput (100 concurrent)
 
-| Metric | cr-sqlite | hook-sync (Go) | hook-sync (Bun) |
-|--------|----------:|----------:|----------:|
-| Single node | 365 QPS | **2058 QPS** | TBD |
-| Dual-node round-robin | 24 QPS | **17,177 QPS** | TBD |
+| Metric | Go (preupdate_hook + UUIDv7) | Bun (triggers + UUIDv4) |
+|--------|----------------------------:|-----------------------:|
+| Write throughput | **10,272 QPS** | 1,250 QPS |
+| Dual-node round-robin | **9,321 QPS** | — |
+| Write latency p50 | **0.08ms** | 0.10ms |
+| Read latency p50 | 0.23ms | **0.17ms** |
+| Sync delay p50 | 51ms | 52ms |
+| Integrity | 540 ✅ | 540 ✅ |
 
-### Sync Delay (20 writes, poll until visible on peer)
+Go is 8.2x faster on writes (zero-overhead hook vs trigger). Read latency Bun wins (0.17ms vs 0.23ms). Sync delay identical (~50ms = batch interval).
 
-| Metric | cr-sqlite | hook-sync (Go) | hook-sync (Bun) |
-|--------|----------:|----------:|----------:|
-| p50 (forward) | 165ms | **52ms** | TBD |
-| p95 (forward) | 344ms | **54ms** | TBD |
-
-### Direct Go Benchmark (pure SQLite, no HTTP overhead)
+### Direct Go Benchmark (pure SQLite, no HTTP)
 
 | Mode | Writes | QPS | Hooks fired |
 |------|-------:|----:|------------:|
+| Sequential | 10,000 | 36,932 | 10,000 ✅ |
 | Transaction | 10,000 | **379,404** | 10,000 ✅ |
 
-379K QPS confirms **zero overhead** from preupdate_hook. cr-sqlite is 365 QPS (trigger overhead 2.6x). hook-sync is **1038x faster** in transaction mode.
+379K QPS confirms **zero overhead** from preupdate_hook — hook fires on every write with no measurable cost.
+
+### UUIDv4 vs UUIDv7
+
+Each language uses the fastest UUID for its runtime:
+
+| Language | UUID | Why | DB QPS (100K transaction) |
+|----------|------|-----|--------------------------:|
+| Go | UUIDv7 | B-tree is bottleneck → sequential insert wins | 378,207 |
+| Bun | UUIDv4 | `crypto.randomUUID()` native C++ (31M gen QPS) → generation is bottleneck | 1,113,119 |
+
+Go: UUIDv7 2.1x faster at 100K writes (B-tree page splits with random v4).
+Bun: UUIDv4 1.5x faster (native generation crushes JS UUIDv7 by 18x; bun:sqlite too fast for B-tree to matter).
 
 ### Batch Interval Optimization
 
@@ -167,15 +179,16 @@ Burst sync is constant ~20-25ms regardless of interval — batch threshold (100 
 
 ## Comparison
 
-| | cr-sqlite | hook-sync (Go) | hook-sync (Bun) |
-|---|---|---|---|
-| Write overhead | 2.6x (trigger) | Zero | 1 INSERT/change |
-| Sync reliability | Reliable (row-level) | Reliable (row-level) | Reliable (row-level) |
-| Multi-writer | Yes (CRDT) | Yes (UUIDv7 PK) | Yes (UUIDv7 PK) |
-| Sync delay | ~165ms | ~52ms | ~52ms |
-| Conflict resolution | Last-write-wins | None needed (UUIDv7) | None needed (UUIDv7) |
-| Binding | SQLite extension | Go (mattn) | bun:sqlite (built-in) |
-| Cross-language sync | No | Yes (same protocol) | Yes (same protocol) |
+| | hook-sync (Go) | hook-sync (Bun) |
+|---|---|---|
+| Capture mechanism | preupdate_hook (zero overhead) | SQLite triggers (1 INSERT/change) |
+| Write throughput | 10,272 QPS | 1,250 QPS |
+| Sync delay | ~52ms | ~52ms |
+| UUID | UUIDv7 (B-tree optimal) | UUIDv4 (native gen optimal) |
+| Conflict resolution | None needed (UUID PK) | None needed (UUID PK) |
+| Binding | mattn/go-sqlite3 | bun:sqlite (built-in) |
+| Cross-language sync | Yes (same protocol) | Yes (same protocol) |
+
 
 ## License
 
