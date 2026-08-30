@@ -135,12 +135,12 @@ hook-sync is **2.1x faster** than walsync and **5.6x faster** than cr-sqlite on 
 
 | Metric | walsync | cr-sqlite | hook-sync |
 |--------|--------:|----------:|----------:|
-| p50 (forward) | 4742ms | 165ms | **100ms** |
-| p95 (forward) | 5707ms | 344ms | **102ms** |
-| p50 (reverse) | N/A | 144ms | **100ms** |
-| min | 255ms | ~144ms | **55ms** |
+| p50 (forward) | 4742ms | 165ms | **52ms** |
+| p95 (forward) | 5707ms | 344ms | **54ms** |
+| p50 (reverse) | N/A | 144ms | **52ms** |
+| min | 255ms | ~144ms | **12ms** (10ms interval) |
 
-hook-sync sync delay p50 = 100ms (batch interval). Tunable: reduce batch interval to 50ms → ~50ms sync delay.
+hook-sync sync delay p50 ≈ batch interval (default 50ms). Tunable via `-batch-ms` flag. See [Batch Interval Optimization](#batch-interval-optimization) below.
 
 ### Batch Interval Optimization
 
@@ -164,9 +164,9 @@ Sync delay is directly controlled by the `-batch-ms` flag. Benchmarked across 6 
 
 **Recommendation:**
 
-- **Local/LAN (0-5ms RTT):** `10ms` — lowest sync delay, no overhead penalty
-- **Remote/WAN (35-40ms RTT):** `50ms` — sync delay ~50ms + RTT, avoids batch pileup from network latency
-- **Default `100ms`:** safe for mixed environments, still 47x faster than walsync
+- **Local/LAN (0-5ms RTT):** `10ms` — lowest sync delay (12ms p50), no overhead penalty
+- **Remote/WAN (35-40ms RTT):** `50ms` (default) — sync delay ~52ms + RTT, avoids batch pileup from network latency
+- **Conservative:** `100ms` — safe for high-latency or unreliable links, still 47x faster than walsync
 
 The batch threshold (100 changes) provides a safety valve: burst writes always ship immediately regardless of interval.
 
@@ -200,7 +200,7 @@ hook-sync latency is ~0.08ms because localhost (0ms RTT). walsync/cr-sqlite ~35-
 | Write overhead | Zero | 2.6x (trigger) | Zero |
 | Sync reliability | Broken (page layout) | Reliable (row-level) | Reliable (row-level) |
 | Multi-writer | No | Yes (CRDT) | Yes (UUID PK) |
-| Sync delay | N/A | ~165ms | ~100ms (batch) |
+| Sync delay | N/A | ~165ms | ~52ms (default 50ms batch) |
 | Conflict resolution | N/A | Last-write-wins | None needed (UUID) |
 | Binding support | N/A | SQLite extension | Go (mattn), needs custom for JS/Python |
 

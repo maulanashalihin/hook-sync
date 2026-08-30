@@ -35,6 +35,7 @@ type Node struct {
 	db       *sql.DB
 	conn     *sqlite3.SQLiteConn
 	changeCh chan Change
+	batchInterval time.Duration
 }
 
 var syncing bool
@@ -45,6 +46,7 @@ func main() {
 		id      = flag.String("id", "", "node ID (e.g. node1)")
 		dbPath  = flag.String("db", "", "SQLite DB path")
 		listen  = flag.String("listen", "", "HTTP listen address (e.g. :9001)")
+		batchMs = flag.Int("batch-ms", 50, "batch ship interval in milliseconds")
 		peerURL = flag.String("peer", "", "peer URL (e.g. http://localhost:9002)")
 	)
 	flag.Parse()
@@ -57,6 +59,7 @@ func main() {
 		ID:       *id,
 		DBPath:   *dbPath,
 		Listen:   *listen,
+		batchInterval: time.Duration(*batchMs) * time.Millisecond,
 		PeerURL:  *peerURL,
 		changeCh: make(chan Change, 10000),
 	}
@@ -197,7 +200,7 @@ func (n *Node) captureChange(d sqlite3.SQLitePreUpdateData) {
 // batchShip collects changes and ships every 100ms
 func (n *Node) batchShip() {
 	batch := make([]Change, 0, 100)
-	ticker := time.NewTicker(100 * time.Millisecond)
+	ticker := time.NewTicker(n.batchInterval)
 	defer ticker.Stop()
 
 	for {
