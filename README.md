@@ -280,7 +280,7 @@ At equal durability, raw write throughput is tied in single-write mode (HTTP ove
 | Sync overhead | ~0% (background goroutine) | WAL sender overhead |
 | Replica converge (100K items) | 2s (batch 10K + drain mode) | 3s (WAL streaming) |
 | Multi-writer | Yes (UUID PK, idempotent) | No (primary-only) |
-| Cross-runtime | Go, Bun, Node | Go-only |
+| Sync engine runtime | Go, Bun, Node (pick any) | Server-internal (C, fixed) |
 | Topology | Point-to-point, full mesh, hub | Primary-replica only |
 | Operational complexity | Single binary + SQLite file | Postgres cluster + replication config |
 
