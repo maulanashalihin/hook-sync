@@ -146,7 +146,7 @@ const stmtListCats = db.prepare(
 );
 
 const stmtChanges = db.prepare(
-	"SELECT change_id, table_name, op, row_id, row_data FROM _changes ORDER BY change_id LIMIT 100",
+	"SELECT change_id, table_name, op, row_id, row_data FROM _changes ORDER BY change_id LIMIT 10000",
 );
 const stmtDeleteChanges = db.prepare(
 	"DELETE FROM _changes WHERE change_id <= ?",

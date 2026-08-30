@@ -141,7 +141,7 @@ const stmtDeadLetterCount = db.prepare(
 
 // Per-peer watermark statements
 const stmtPeerChanges = db.prepare(
-	"SELECT change_id, op, row_id, row_data FROM _changes WHERE change_id > ? ORDER BY change_id LIMIT 100",
+	"SELECT change_id, op, row_id, row_data FROM _changes WHERE change_id > ? ORDER BY change_id LIMIT 10000",
 );
 const stmtUpdatePeerAck = db.prepare(
 	"UPDATE _peer_state SET last_acked = ? WHERE peer_url = ?",

@@ -40,6 +40,7 @@ type Node struct {
 	PeerURL       string
 	db            *sql.DB
 	batchInterval time.Duration
+	batchSize     int
 }
 
 func main() {
@@ -48,6 +49,7 @@ func main() {
 		dbPath  = flag.String("db", "", "SQLite DB path")
 		listen  = flag.String("listen", "", "HTTP listen address")
 		batchMs = flag.Int("batch-ms", 50, "batch ship interval ms")
+		batchSize = flag.Int("batch-size", 10000, "max changes per ship batch")
 		peerURL = flag.String("peer", "", "peer URL")
 	)
 	flag.Parse()
@@ -61,6 +63,7 @@ func main() {
 		DBPath:        *dbPath,
 		Listen:        *listen,
 		batchInterval: time.Duration(*batchMs) * time.Millisecond,
+		batchSize:     *batchSize,
 		PeerURL:       *peerURL,
 	}
 
@@ -188,74 +191,78 @@ func (n *Node) batchShip() {
 			continue
 		}
 
-		rows, err := n.db.Query("SELECT change_id, table_name, op, row_id, row_data FROM _changes ORDER BY change_id LIMIT 100")
-		if err != nil {
-			log.Printf("[%s] query _changes error: %v", n.ID, err)
-			continue
-		}
-
-		type changeRow struct {
-			ChangeID  int64
-			TableName string
-			Op        string
-			RowID     string
-			RowData   string
-		}
-		var crs []changeRow
-		for rows.Next() {
-			var cr changeRow
-			var rowData sql.NullString
-			if err := rows.Scan(&cr.ChangeID, &cr.TableName, &cr.Op, &cr.RowID, &rowData); err != nil {
-				continue
-			}
-			cr.RowData = rowData.String
-			crs = append(crs, cr)
-		}
-		rows.Close()
-
-		if len(crs) == 0 {
-			continue
-		}
-
-		changes := make([]Change, 0, len(crs))
-		var batchID int64
-		for _, cr := range crs {
-			if cr.ChangeID > batchID {
-				batchID = cr.ChangeID
-			}
-			c := Change{Op: cr.Op, Table: cr.TableName}
-			if cr.Op == "DELETE" {
-				c.OldID = cr.RowID
-			} else if cr.RowData != "" {
-				json.Unmarshal([]byte(cr.RowData), &c.Row)
-			}
-			changes = append(changes, c)
-		}
-
-		acked := false
-		for attempt := 0; attempt < 5; attempt++ {
-			if attempt > 0 {
-				time.Sleep(backoffs[attempt-1] * time.Millisecond)
-			}
-			resp, err := n.shipWithAck(batchID, changes)
+		// Drain mode: ship until _changes is empty within this tick
+		for {
+			rows, err := n.db.Query("SELECT change_id, table_name, op, row_id, row_data FROM _changes ORDER BY change_id LIMIT ?", n.batchSize)
 			if err != nil {
-				log.Printf("[%s] ship attempt %d error: %v", n.ID, attempt+1, err)
-				continue
-			}
-			if resp.Ack == batchID {
-				n.db.Exec("DELETE FROM _changes WHERE change_id <= ?", batchID)
-				acked = true
+				log.Printf("[%s] query _changes error: %v", n.ID, err)
 				break
 			}
-		}
 
-		if !acked {
-			log.Printf("[%s] ship failed after 5 retries, moving to _dead_letter", n.ID)
-			for _, cr := range crs {
-				n.db.Exec("INSERT INTO _dead_letter(table_name, op, row_id, row_data, failed_at, retry_count) VALUES(?, ?, ?, ?, ?, ?)",
-					cr.TableName, cr.Op, cr.RowID, cr.RowData, time.Now().UnixMilli(), 5)
+			type changeRow struct {
+				ChangeID  int64
+				TableName string
+				Op        string
+				RowID     string
+				RowData   string
 			}
-			n.db.Exec("DELETE FROM _changes WHERE change_id <= ?", batchID)
+			var crs []changeRow
+			for rows.Next() {
+				var cr changeRow
+				var rowData sql.NullString
+				if err := rows.Scan(&cr.ChangeID, &cr.TableName, &cr.Op, &cr.RowID, &rowData); err != nil {
+					continue
+				}
+				cr.RowData = rowData.String
+				crs = append(crs, cr)
+			}
+			rows.Close()
+
+			if len(crs) == 0 {
+				break // _changes empty, done draining
+			}
+
+			changes := make([]Change, 0, len(crs))
+			var batchID int64
+			for _, cr := range crs {
+				if cr.ChangeID > batchID {
+					batchID = cr.ChangeID
+				}
+				c := Change{Op: cr.Op, Table: cr.TableName}
+				if cr.Op == "DELETE" {
+					c.OldID = cr.RowID
+				} else if cr.RowData != "" {
+					json.Unmarshal([]byte(cr.RowData), &c.Row)
+				}
+				changes = append(changes, c)
+			}
+
+			acked := false
+			for attempt := 0; attempt < 5; attempt++ {
+				if attempt > 0 {
+					time.Sleep(backoffs[attempt-1] * time.Millisecond)
+				}
+				resp, err := n.shipWithAck(batchID, changes)
+				if err != nil {
+					log.Printf("[%s] ship attempt %d error: %v", n.ID, attempt+1, err)
+					continue
+				}
+				if resp.Ack == batchID {
+					n.db.Exec("DELETE FROM _changes WHERE change_id <= ?", batchID)
+					acked = true
+					break
+				}
+			}
+
+			if !acked {
+				log.Printf("[%s] ship failed after 5 retries, moving to _dead_letter", n.ID)
+				for _, cr := range crs {
+					n.db.Exec("INSERT INTO _dead_letter(table_name, op, row_id, row_data, failed_at, retry_count) VALUES(?, ?, ?, ?, ?, ?)",
+						cr.TableName, cr.Op, cr.RowID, cr.RowData, time.Now().UnixMilli(), 5)
+				}
+				n.db.Exec("DELETE FROM _changes WHERE change_id <= ?", batchID)
+				break // stop draining on persistent failure
+			}
 		}
 	}
 }

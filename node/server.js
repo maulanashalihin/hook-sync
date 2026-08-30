@@ -98,7 +98,7 @@ const stmtReplace = db.prepare("INSERT OR REPLACE INTO items(id, name, value, cr
 const stmtList = db.prepare("SELECT id, name, value, created_at, updated_at, node_id FROM items ORDER BY created_at DESC LIMIT 100");
 const stmtGet = db.prepare("SELECT id, name, value, created_at, updated_at, node_id FROM items WHERE id = ?");
 const stmtCount = db.prepare("SELECT COUNT(*) as count FROM items");
-const stmtChanges = db.prepare("SELECT change_id, op, row_id, row_data FROM _changes ORDER BY change_id LIMIT 100");
+const stmtChanges = db.prepare("SELECT change_id, op, row_id, row_data FROM _changes ORDER BY change_id LIMIT 10000");
 const stmtDeleteChanges = db.prepare("DELETE FROM _changes WHERE change_id <= ?");
 const stmtSyncOn = db.prepare("UPDATE _meta SET value = 1 WHERE key = 'syncing'");
 const stmtSyncOff = db.prepare("UPDATE _meta SET value = 0 WHERE key = 'syncing'");

@@ -55,6 +55,7 @@ type Node struct {
 	Peers         []string
 	db            *sql.DB
 	batchInterval time.Duration
+	batchSize     int
 }
 
 func main() {
@@ -63,6 +64,7 @@ func main() {
 		dbPath  = flag.String("db", "", "SQLite DB path")
 		listen  = flag.String("listen", "", "HTTP listen address (e.g. :9001)")
 		batchMs = flag.Int("batch-ms", 50, "batch ship interval in milliseconds")
+		batchSize = flag.Int("batch-size", 10000, "max changes per ship batch")
 		peers   peerList
 	)
 	flag.Var(&peers, "peer", "peer URL (repeatable, e.g. http://localhost:9002)")
@@ -78,6 +80,7 @@ func main() {
 		Listen:        *listen,
 		Peers:         peers,
 		batchInterval: time.Duration(*batchMs) * time.Millisecond,
+		batchSize:     *batchSize,
 	}
 
 	node.initDB()
@@ -188,30 +191,45 @@ func (n *Node) batchShip() {
 			continue
 		}
 
-		// Read current peer states
-		rows, err := n.db.Query("SELECT peer_url, last_acked FROM _peer_state")
-		if err != nil {
-			log.Printf("[%s] query _peer_state error: %v", n.ID, err)
-			continue
-		}
-		var peers []peerState
-		for rows.Next() {
-			var ps peerState
-			rows.Scan(&ps.URL, &ps.LastAcked)
-			peers = append(peers, ps)
-		}
-		rows.Close()
+		// Drain mode: ship until no peer has a full batch pending
+		for {
+			// Read current peer states
+			rows, err := n.db.Query("SELECT peer_url, last_acked FROM _peer_state")
+			if err != nil {
+				log.Printf("[%s] query _peer_state error: %v", n.ID, err)
+				break
+			}
+			var peers []peerState
+			for rows.Next() {
+				var ps peerState
+				rows.Scan(&ps.URL, &ps.LastAcked)
+				peers = append(peers, ps)
+			}
+			rows.Close()
 
-		// Ship to all peers concurrently
-		var wg sync.WaitGroup
-		for _, ps := range peers {
-			wg.Add(1)
-			go func(ps peerState) {
-				defer wg.Done()
-				n.shipToPeer(ps, backoffs)
-			}(ps)
+			// Ship to all peers concurrently
+			var wg sync.WaitGroup
+			var mu sync.Mutex
+			maxShipped := 0
+			for _, ps := range peers {
+				wg.Add(1)
+				go func(ps peerState) {
+					defer wg.Done()
+					shipped := n.shipToPeer(ps, backoffs)
+					mu.Lock()
+					if shipped > maxShipped {
+						maxShipped = shipped
+					}
+					mu.Unlock()
+				}(ps)
+			}
+			wg.Wait()
+
+			// If no peer shipped a full batch, done draining
+			if maxShipped < n.batchSize {
+				break
+			}
 		}
-		wg.Wait()
 
 		// Cleanup: delete changes that ALL peers have ACKed
 		var minAck sql.NullInt64
@@ -225,11 +243,11 @@ func (n *Node) batchShip() {
 // shipToPeer ships pending changes (change_id > lastAcked) to a single peer.
 // Retries with exponential backoff. On failure, logs and returns — changes
 // stay in _changes until the peer comes back and ACKs.
-func (n *Node) shipToPeer(ps peerState, backoffs []time.Duration) {
-	rows, err := n.db.Query("SELECT change_id, op, row_id, row_data FROM _changes WHERE change_id > ? ORDER BY change_id LIMIT 100", ps.LastAcked)
+func (n *Node) shipToPeer(ps peerState, backoffs []time.Duration) int {
+	rows, err := n.db.Query("SELECT change_id, op, row_id, row_data FROM _changes WHERE change_id > ? ORDER BY change_id LIMIT ?", ps.LastAcked, n.batchSize)
 	if err != nil {
 		log.Printf("[%s] query _changes error: %v", n.ID, err)
-		return
+		return 0
 	}
 
 	type changeRow struct {
@@ -249,7 +267,7 @@ func (n *Node) shipToPeer(ps peerState, backoffs []time.Duration) {
 	rows.Close()
 
 	if len(crs) == 0 {
-		return
+		return 0
 	}
 
 	// Build changes payload
@@ -279,11 +297,12 @@ func (n *Node) shipToPeer(ps peerState, backoffs []time.Duration) {
 		}
 		if resp.Ack == batchID {
 			n.db.Exec("UPDATE _peer_state SET last_acked = ? WHERE peer_url = ?", batchID, ps.URL)
-			return
+			return len(crs)
 		}
 	}
 
 	log.Printf("[%s] peer %s unreachable after %d retries, will retry next cycle", n.ID, ps.URL, len(backoffs))
+	return 0
 }
 
 func (n *Node) shipWithAck(batchID int64, changes []Change, peerURL string) (*SyncResponse, error) {

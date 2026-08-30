@@ -59,7 +59,7 @@ X-Node-Id: node1
 ```
 Sender                                Receiver
   │                                      │
-  │ 1. Read _changes (LIMIT 100)         │
+  │ 1. Read _changes (LIMIT 10000)       │
   │ 2. batch_id = max(change_id)         │
   │ 3. POST /sync {batch_id, changes}    │
   │ ───────────────────────────────────► │
