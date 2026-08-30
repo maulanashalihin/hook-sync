@@ -52,25 +52,48 @@ Ship to all peers. Each peer deduplicates via INSERT OR REPLACE. That's it.
 
 **Full mesh is the right choice up to ~5-7 nodes.** Beyond that, bandwidth and connection count make it impractical.
 
-## When Full Mesh Doesn't Scale: Star + Relay
 
-For 8+ nodes, use a hub. Edge nodes only connect to hub. Hub forwards changes between edges.
+## When Full Mesh Doesn't Scale: Dedicated Hub
 
-```
-  edge1 ──→ hub ←── edge2
-            ↑
-         edge3, edge4, ...
-```
-
-**Why this needs new code:** edge1 writes, ships to hub. Hub applies. But hub's `syncing` flag suppresses triggers — hub does NOT re-capture and re-ship to edge2. Edge2 never sees edge1's changes.
-
-**Fix: relay mode.** Hub receives changes from edge1, applies locally, AND forwards the raw changes to edge2, edge3, etc. The `syncing` flag still prevents trigger re-capture, but hub explicitly forwards received changes to other peers.
+For 8+ nodes, use a **dedicated hub** — a node that only relays changes, does not serve client requests.
 
 ```
-edge1 → hub (apply + forward) → edge2, edge3, edge4
+  edge1 ──POST /sync──→ hub ──POST /sync──→ edge2
+         (changes)      │
+                        ├──→ edge3
+                        ├──→ edge4
+                        └ apply to local SQLite (full backup)
 ```
 
-**Trade-off:** hub is single point of failure. Mitigate: hub ←→ hub-backup (point-to-point, already works).
+### Why dedicated hub is simpler than dual-purpose hub
+
+A dual-purpose hub (serves `/api/items` AND relays) has a problem: the `syncing` flag suppresses triggers during apply, which also blocks forwarding. Working around this is complex.
+
+A dedicated hub has **no triggers at all**. All data enters via `/sync`, not local writes. No triggers = no `syncing` flag problem = forwarding just works.
+
+| | Dual-purpose hub | Dedicated hub |
+|---|---|---|
+| Serves `/api/items`? | Yes | No |
+| Has triggers? | Yes | No |
+| `syncing` flag problem? | Yes — blocks forward | No — no triggers |
+| Client traffic? | Yes — competes with relay | No — pure relay |
+| What to build | Relay + work around syncing flag | Relay only |
+
+### What the hub does
+
+1. **Receive `/sync`** — accept changes from any edge
+2. **Apply locally** — INSERT OR REPLACE (hub has full data copy, acts as backup)
+3. **Forward** — send raw received changes to all other edges
+
+Step 3 is the only new code. Steps 1 and 2 already work.
+
+### Hub failure
+
+Hub is single point of failure. Mitigate: run hub ←→ hub-backup (point-to-point, already works). If hub dies, hub-backup takes over. Edges reconnect to hub-backup.
+
+### Edge reconnection
+
+If an edge goes down and comes back, it ships all pending `_changes` to hub. Hub forwards to other edges. No data loss — same ACK + retry mechanism as point-to-point.
 
 ## Multi-Region: Hierarchical
 
