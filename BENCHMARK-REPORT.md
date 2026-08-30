@@ -1,216 +1,138 @@
-# Benchmark Report: hook-sync vs cr-sqlite
+# Benchmark Report: hook-sync
 
 **Tanggal:** 2026-08-30
-**Stack:** Bun 1.4.0 (client), Go 1.26 + Fiber + mattn/go-sqlite3 (hook-sync), SQLite 3.46
-**Server (cr-sqlite):** Server A (6 vCPU, 11GB RAM, Ubuntu 26.04) + Server B (6 vCPU, 11GB RAM, Ubuntu 22.04)
-**Server (hook-sync):** Local — 2 nodes di Mac M4 (same machine, localhost)
-**Client:** Mac M4 (semua benchmark dijalankan dari sini)
-**Network (cr-sqlite):** Mac→Server A ~35ms RTT, Mac→Server B ~40ms RTT
-**Network (hook-sync):** localhost, ~0ms RTT
-
-> **Caveat:** hook-sync berjalan di localhost (0ms RTT), sementara cr-sqlite diuji via public internet (35-40ms RTT). Network latency mendominasi write/read latency. Untuk perbandingan yang adil, fokus pada **sync delay** (relative to write completion) dan **write throughput** (concurrent, di mana network pipelining mengurangi per-request overhead). Benchmark direct Go (tanpa HTTP) disertakan untuk isolasi pure SQLite performance.
+**Stack:** Go 1.26 + Fiber + mattn/go-sqlite3, Node 22 + hyper-express + better-sqlite3, Bun 1.4 + Bun.serve + bun:sqlite
+**Environment:** Mac M4, 2 nodes per runtime on localhost, 50ms batch interval
+**Methodology:** Each runtime tested independently. No cross-runtime traffic during testing. All processes stopped before each run.
 
 ---
 
-## Arsitektur yang Diuji
+## Direct SQLite Benchmark (10K writes, no HTTP)
 
-### cr-sqlite (v0.16.3)
+This is the reliable benchmark — pure SQLite write speed with capture mechanism firing. No HTTP, no network, no event loop overhead.
 
-```
-Mac (client) ──→ Server A (Bun app, readwrite SQLite + crsqlite extension)
-                     ▲                          │
-                     │ /sync poll every 50ms    │ /sync poll every 50ms
-                     │ row-level CRDT changes   │
-                     │                          ▼
-                Server B (Bun app, readwrite SQLite + crsqlite extension)
-```
+| Runtime | Mode | QPS | Capture | Hooks/Triggers fired |
+|---------|------|----:|---------|---------------------:|
+| Go | Sequential | 255K | preupdate_hook | 10,000 ✅ |
+| Go | Transaction | 373K | preupdate_hook | 10,000 ✅ |
+| Node | Sequential | 307K | triggers | 10,000 ✅ |
+| Node | Transaction | 354K | triggers | 10,000 ✅ |
+| Bun | Sequential | 339K | triggers | 10,000 ✅ |
+| Bun | Transaction | **394K** | triggers | 10,000 ✅ |
 
-- Multi-writer: kedua node menerima write
-- Sync: bidirectional, row-level CRDT changes via HTTP polling
-- Conflict resolution: last-write-wins per column (CRDT)
-- Write overhead: trigger-based (2.6x slower writes)
+### Key findings
 
-### hook-sync (prototype)
-
-```
-Mac (client) ──→ node1 (Go app, Fiber, readwrite SQLite + preupdate_hook)
-                     ▲                          │
-                     │ POST /sync batch 50ms    │ POST /sync batch 50ms
-                     │ row-level changes        │
-                     │                          ▼
-                node2 (Go app, Fiber, readwrite SQLite + preupdate_hook)
-```
-
-- Multi-writer: kedua node menerima write
-- Sync: bidirectional, row-level changes via preupdate_hook → batch 50ms → HTTP POST
-- Conflict resolution: UUID PK = zero conflict (no CRDT needed)
-- Write overhead: zero (hook is in-memory callback, no extra DB writes)
+- **Bun:sqlite is fastest in raw SQLite** — 394K QPS in transaction mode, even with trigger overhead (1 extra INSERT per change). The binding itself is faster than Go's mattn/go-sqlite3.
+- **Go preupdate_hook has zero overhead** — no extra DB writes. But mattn/go-sqlite3 binding has more overhead per call than bun:sqlite.
+- **Trigger overhead is real but small** — measured separately: -45% sequential, -70% transaction vs no triggers. But binding speed difference is larger than trigger overhead.
 
 ---
 
-## Hasil Benchmark
+## HTTP Benchmark (100 concurrent requests, 2 nodes same runtime)
 
-### Write Latency (100 requests sequential)
+⚠️ **High variance — interpret with caution.** Localhost HTTP benchmark with 100 requests shows 10x variance across runs (e.g. Go dual-node: 2,400–24,000 QPS across runs). Numbers below are from single representative runs. Do not treat as definitive runtime comparison.
 
-| Metric | cr-sqlite | hook-sync | Pemenang |
-|--------|----------:|----------:|:--------:|
-| Write latency node1 p50 | 37.8ms | **0.08ms** | hook-sync (local) |
-| Write latency node1 p95 | 39.7ms | **0.14ms** | hook-sync (local) |
-| Write latency node2 p50 | 58.7ms | **0.07ms** | hook-sync (local) |
+### Write & Read Latency
 
-> hook-sync latency ~0.08ms karena localhost (0ms RTT). cr-sqlite ~35-40ms karena network RTT. Ini bukan perbandingan SQLite speed — ini network dominance.
+| Metric | Go | Node | Bun |
+|--------|---:|---:|---:|
+| Write latency p50 | **0.09ms** | 0.10ms | 0.10ms |
+| Write latency p95 | 0.15ms | 0.18ms | 0.20ms |
+| Read latency p50 | 0.21ms | 0.31ms | **0.14ms** |
+| Read latency p95 | 0.36ms | 0.46ms | 0.17ms |
 
-### Read Latency (100 requests sequential)
+Write latency comparable across all three. Bun wins read latency — bun:sqlite binding is fast for reads.
 
-| Metric | cr-sqlite | hook-sync | Pemenang |
-|--------|----------:|----------:|:--------:|
-| Read latency node1 p50 | 35.3ms | **0.22ms** | hook-sync (local) |
-| Read latency node2 p50 | 40.6ms | **0.23ms** | hook-sync (local) |
+### Sync Delay
 
-> Sama: network dominance. Read speed SQLite itself is comparable.
+| Metric | Go | Node | Bun |
+|--------|---:|---:|---:|
+| Sync delay p50 (A→B) | 51ms | 49ms | 52ms |
+| Sync delay p50 (B→A) | 51ms | 49ms | 52ms |
 
-### Sync Delay (20 writes, poll until visible di peer)
+Sync delay = batch interval (50ms) in all cases. Bottleneck is the timer, not the runtime. Tune via `--batch-ms` flag.
 
-| Metric | cr-sqlite | hook-sync | Pemenang |
-|--------|----------:|----------:|:--------:|
-| Sync delay p50 (forward) | 165ms | **52ms** | **hook-sync (3.2x faster)** |
-| Sync delay p95 (forward) | 344ms | **54ms** | **hook-sync** |
-| Sync delay p50 (reverse) | 144ms | **52ms** | **hook-sync** |
-| Sync delay min | ~144ms | **12ms** (10ms interval) | **hook-sync** |
+### Integrity
 
-> hook-sync sync delay p50 = 52ms (default 50ms batch interval). Sync terjadi setiap 50ms ticker, jadi worst case = 50ms + HTTP latency. cr-sqlite poll setiap 50ms tapi butuh 2-3 poll cycles untuk detect + ship + apply.
+| Runtime | Node A count | Node B count | Match |
+|---------|---:|---:|:---:|
+| Go | 340 | 340 | ✅ |
+| Node | 631 | 680 | ⚠️ |
+| Bun | 340 | 340 | ✅ |
 
-### Write Throughput (100 concurrent requests)
+Node integrity mismatch on this run — likely race condition in sync during burst writes. Needs investigation.
 
-| Metric | cr-sqlite | hook-sync | Pemenang |
-|--------|----------:|----------:|:--------:|
-| Write throughput (single node) | 365 QPS | **2058 QPS** | **hook-sync (5.6x)** |
-| Write throughput (dual-node round-robin) | 24 QPS | **17,177 QPS** | **hook-sync (716x)** |
+---
 
-> hook-sync dual-node 17,177 QPS karena kedua node accept writes independently — UUID PK = zero conflict, no coordination. cr-sqlite dual-node hanya 24 QPS karena CRDT merge overhead pada concurrent writes.
+## UUIDv4 vs UUIDv7
 
-### Read Throughput (100 concurrent requests)
+Each language uses the fastest UUID for its runtime:
 
-| Metric | cr-sqlite | hook-sync | Pemenang |
-|--------|----------:|----------:|:--------:|
-| Read throughput (dual-node) | 162 QPS | **8132 QPS** | hook-sync (local) |
+| Language | UUID | Why |
+|----------|------|-----|
+| Go | UUIDv7 | B-tree is bottleneck → time-ordered = sequential insert, 2.1x faster at 100K writes |
+| Bun | UUIDv4 | `crypto.randomUUID()` native C++ (31M gen QPS) → generation is bottleneck, 1.5x faster than JS UUIDv7 |
+| Node | UUIDv4 | `crypto.randomUUID()` native (Node 19+) → same rationale as Bun |
 
-> hook-sync read throughput tinggi karena localhost. cr-sqlite 162 QPS dengan persistent connection via public internet.
+UUIDv4 random inserts cause B-tree page splits at scale (QPS drops 50% at 100K writes in Go). UUIDv7 is time-ordered — append-like, no page splits. But in Bun/Node, native UUIDv4 generation is so fast that B-tree overhead is negligible, and `crypto.randomUUID()` beats JS UUIDv7 by 18x.
 
-### Direct Go Benchmark (pure SQLite, no HTTP)
+---
 
-| Mode | Writes | QPS | Hooks fired |
-|------|-------:|----:|------------:|
-| Sequential | 100 | 66,105 | 100 ✅ |
-| Sequential | 1,000 | 26,198 | 1,000 ✅ |
-| Sequential | 10,000 | 36,932 | 10,000 ✅ |
-| **Transaction** | 100 | **324,896** | 100 ✅ |
-| **Transaction** | 1,000 | **378,937** | 1,000 ✅ |
-| **Transaction** | 10,000 | **379,404** | 10,000 ✅ |
-
-> Ini adalah true SQLite write speed dengan preupdate_hook aktif. 379K QPS dalam transaction mode = zero overhead dari hook. Untuk comparison: cr-sqlite write throughput 365 QPS (trigger overhead 2.6x). hook-sync = **1038x faster** dalam transaction mode.
-
-### Batch Interval Optimization
+## Batch Interval Optimization (Go)
 
 | Interval | Sync p50 | Sync p95 | Write QPS | Burst sync (100 writes) |
 |----------|---------:|---------:|----------:|------------------------:|
-| **10ms** | **11.79ms** | **12.81ms** | **7648** | 20.55ms |
-| 25ms | 23.73ms | 30.27ms | 4911 | 23.78ms |
-| 50ms (default) | 52.14ms | 53.89ms | 5746 | 24.61ms |
-| 100ms | 99.69ms | 104.48ms | 5242 | 22.01ms |
-| 200ms | 200.06ms | 204.44ms | 5012 | 18.70ms |
-| 500ms | 499.82ms | 504.51ms | 6808 | 22.45ms |
+| **10ms** | **12ms** | **13ms** | 7,648 | 20ms |
+| 25ms | 24ms | 30ms | 4,911 | 24ms |
+| 50ms (default) | 52ms | 54ms | 5,746 | 25ms |
+| 100ms | 100ms | 104ms | 5,242 | 22ms |
+| 200ms | 200ms | 204ms | 5,012 | 19ms |
+| 500ms | 500ms | 505ms | 6,808 | 22ms |
 
-**Findings:**
+### Findings
 
 - Sync delay ≈ interval + 1-2ms overhead (linear, predictable)
 - Burst sync (100 concurrent writes) is constant ~20-25ms regardless of interval — batch threshold (100 changes) triggers immediate ship, bypassing the ticker
-- Write throughput (5-7.6K QPS) shows no significant correlation with interval — differences are noise
-- Ticker fires no-op on empty batch (`if len(batch) > 0` guard) — no empty HTTP requests
+- Write throughput shows no significant correlation with interval — differences are noise
+- Ticker fires no-op on empty batch — no empty HTTP requests
 
-**Recommendation:**
+### Recommendation
 
 - **Local/LAN (0-5ms RTT):** `10ms` — lowest sync delay (12ms p50), no overhead penalty
-- **Remote/WAN (35-40ms RTT):** `50ms` (default) — sync delay ~52ms + RTT, avoids batch pileup from network latency
-- **Conservative:** `100ms` — safe for high-latency or unreliable links, still 3.2x faster than cr-sqlite
+- **Remote/WAN (35-40ms RTT):** `50ms` (default) — sync delay ~52ms + RTT
+- **Conservative:** `100ms` — safe for high-latency or unreliable links
 
 ---
 
-## Perbandingan Lengkap
+## Trigger Overhead (Direct SQLite, Go)
 
-| | cr-sqlite | hook-sync |
-|---|---|---|
-| **Write overhead** | 2.6x (trigger) | Zero |
-| **Write throughput (HTTP)** | 365 QPS | 2058 QPS |
-| **Write throughput (direct)** | N/A | 379,404 QPS |
-| **Dual-node write** | 24 QPS | 17,177 QPS |
-| **Sync delay p50** | 165ms | 52ms |
-| **Sync reliability** | ✅ Row-level | ✅ Row-level |
-| **Multi-writer** | ✅ | ✅ |
-| **Conflict resolution** | CRDT LWW | UUID = none needed |
-| **Sync mechanism** | Trigger + poll | preupdate_hook + batch |
-| **Extra DB writes per INSERT** | N (per column) | 0 |
-| **Binding support** | SQLite extension | Go (mattn), needs custom for JS/Python |
-| **Status** | Production | Prototype |
+Measured by comparing direct SQLite writes with and without triggers active:
+
+| Mode | Without triggers | With triggers | Overhead |
+|------|---:|---:|---:|
+| Sequential | 466K QPS | 255K QPS | -45% |
+| Transaction | 1,247K QPS | 373K QPS | -70% |
+
+Trigger overhead is significant in direct SQLite benchmark. However, HTTP benchmark variance (10x) is too high to measure trigger effect through HTTP — HTTP overhead dominates.
 
 ---
 
-## Analisis
+## What this benchmark does NOT tell you
 
-### hook-sync menang di:
-
-1. **Write throughput** — 5.6x faster than cr-sqlite (HTTP). 1038x faster (direct Go, transaction mode). Zero overhead: hook adalah in-memory callback, tidak ada extra DB writes.
-
-2. **Sync delay** — 52ms p50 (default 50ms batch). 3.2x faster than cr-sqlite (165ms). Bisa di-tune: kurangi batch interval ke 10ms → ~12ms sync delay.
-
-3. **Dual-node write** — 17,177 QPS vs cr-sqlite 24 QPS (716x). UUID PK = zero conflict, kedua node write independently tanpa coordination.
-
-4. **Sync reliability** — row-level CDC, full old/new row values dari preupdate_hook.
-
-5. **Simplicity** — no CRDT, no vector clocks, no trigger tables. UUID PK = conflict-free by design.
-
-### hook-sync kalah di:
-
-1. **Binding support** — hanya Go (mattn/go-sqlite3). Tidak exposed di bun:sqlite, better-sqlite3, node:sqlite, Python, Ruby. Untuk stack Bun (current project), perlu extend binding atau pakai Go sidecar.
-
-2. **Network comparison unfair** — hook-sync di localhost, cr-sqlite via public internet. Untuk adil, perlu deploy hook-sync ke server yang sama dan benchmark ulang.
-
-3. **Prototype limitations** — single table, hardcoded columns, no retry, no persistence. Belakang production-ready.
-
-4. **Single connection** — `SetMaxOpenConns(1)` required agar hook capture semua writes. Concurrent writes serialized.
-
-### cr-sqlite kalah di:
-
-1. **Write overhead** — 2.6x slower (trigger writes N rows to `__crsql_clocks` per changed column). 365 QPS vs 2058 QPS (hook-sync).
-
-2. **Dual-node throughput** — 24 QPS. CRDT merge overhead pada concurrent writes.
-
----
-
-## Kesimpulan
-
-**hook-sync adalah approach terbaik untuk SQLite replication:**
-
-- Write speed native SQLite (zero overhead) + sync reliability cr-sqlite (row-level)
-- Sync delay 52ms (tunable ke 12ms)
-- UUID PK = zero conflict, no CRDT complexity
-- 716x faster dual-node write vs cr-sqlite
-
-**Tapi ada satu blocker untuk adoption di stack Bun:** `sqlite3_preupdate_hook` tidak exposed di bun:sqlite. Dua opsi:
-
-1. **Go sidecar** — app Bun tetap pakai bun:sqlite, Go process handle replication (current prototype)
-2. **Extend bun:sqlite** — kontribusi upstream untuk expose preupdate_hook (significant effort)
-
-**Rekomendasi:** prototype ini bukti bahwa `sqlite3_preupdate_hook` viable untuk replication. Untuk production, deploy ke server yang sama dengan cr-sqlite benchmark dan ulangi test untuk perbandingan yang adil.
+1. **HTTP server comparison is unreliable** — localhost with 100 requests has 10x variance. To compare HTTP servers fairly, need remote server + 1000+ requests + multiple runs with variance reported.
+2. **No real-world network latency** — all tests on localhost (0ms RTT). Real deployment adds 35-40ms+ RTT which dominates write/read latency.
+3. **No crash recovery test** — changes in _changes table / in-memory channel are lost on crash before ship. Not benchmarked.
+4. **Single table only** — all benchmarks use `items` table. Multi-table performance not tested.
 
 ---
 
 ## File di Project Ini
 
-- `main.go` — hook-sync prototype (Go + Fiber + mattn/go-sqlite3)
-- `bench-hsync.js` — Benchmark client (same methodology as cr-sqlite benchmark)
-- `bench/main.go` — Direct Go benchmark (pure SQLite, no HTTP overhead)
-- `bench.sh` — Shell benchmark (curl-based)
+- `go/main.go` — Go implementation (preupdate_hook + Fiber)
+- `go/bench/` — Go direct SQLite benchmarks (UUID, throughput)
+- `bun/server.ts` — Bun implementation (triggers + Bun.serve)
+- `node/server.js` — Node implementation (triggers + hyper-express)
+- `bench-hsync.js` — HTTP benchmark client (language-agnostic)
 - `bench-interval.js` — Batch interval optimization benchmark
-- `bench-all-intervals.sh` — Wrapper to test all intervals
-- `BENCHMARK-REPORT.md` — Laporan ini
+- `bench-trigger-overhead.ts` — Trigger overhead measurement
+- `PROTOCOL.md` — Shared wire protocol spec

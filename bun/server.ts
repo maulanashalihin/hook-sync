@@ -1,34 +1,10 @@
-// hook-sync Bun implementation
-// Uses SQLite triggers for CDC (preupdate_hook not exposed in bun:sqlite)
-// Same wire protocol as Go implementation — nodes can sync cross-language
+// hook-sync Bun implementation — pure Bun, zero Node.js APIs
+// Bun.serve + bun:sqlite + crypto.randomUUID()
+// Same wire protocol as Go and Node implementations
 //
 // Usage: bun server.ts --id node1 --db node1.db --listen :9001 --peer http://localhost:9002 --batch-ms 50
 
 import { Database } from "bun:sqlite";
-
-
-// --- UUIDv7 (time-ordered, RFC 9562) ---
-function uuidv7(): string {
-	const ts = Date.now();
-	const buf = new Uint8Array(16);
-	crypto.getRandomValues(buf);
-
-	// 48-bit timestamp (big-endian)
-	buf[0] = (ts / 2 ** 40) & 0xff;
-	buf[1] = (ts / 2 ** 32) & 0xff;
-	buf[2] = (ts / 2 ** 24) & 0xff;
-	buf[3] = (ts / 2 ** 16) & 0xff;
-	buf[4] = (ts / 2 ** 8) & 0xff;
-	buf[5] = ts & 0xff;
-
-	// Version 7
-	buf[6] = (buf[6] & 0x0f) | 0x70;
-	// Variant 10xx
-	buf[8] = (buf[8] & 0x3f) | 0x80;
-
-	const hex = [...buf].map((b) => b.toString(16).padStart(2, "0"));
-	return `${hex.slice(0, 4).join("")}-${hex.slice(4, 6).join("")}-${hex.slice(6, 8).join("")}-${hex.slice(8, 10).join("")}-${hex.slice(10, 16).join("")}`;
-}
 
 // --- Parse args ---
 const args = process.argv.slice(2);
@@ -44,7 +20,7 @@ const PEER_URL = getArg("peer", "");
 const BATCH_MS = parseInt(getArg("batch-ms", "50"));
 
 if (!ID || !DB_PATH || !LISTEN) {
-	console.error("usage: bun server.ts --id node1 --db node1.db --listen :9001 --peer http://localhost:9002 --batch-ms 50");
+	console.error("usage: bun server-native.ts --id node1 --db node1.db --listen :9001 --peer http://localhost:9002 --batch-ms 50");
 	process.exit(1);
 }
 
@@ -54,7 +30,6 @@ db.exec("PRAGMA journal_mode = WAL");
 db.exec("PRAGMA synchronous = NORMAL");
 db.exec("PRAGMA busy_timeout = 5000");
 
-// Schema
 db.exec(`
 	CREATE TABLE IF NOT EXISTS items (
 		id TEXT PRIMARY KEY,
@@ -79,8 +54,7 @@ db.exec(`
 	);
 `);
 
-// Triggers — only fire when not syncing (prevents infinite loop)
-// WHEN clause checks _meta.syncing flag
+// Triggers — only fire when not syncing
 db.exec(`
 	CREATE TRIGGER IF NOT EXISTS items_ai AFTER INSERT ON items
 	WHEN (SELECT value FROM _meta WHERE key = 'syncing') = 0
@@ -105,30 +79,37 @@ db.exec(`
 	END;
 `);
 
+// --- Precompile statements ---
+const stmtInsert = db.prepare("INSERT INTO items(id, name, value, created_at, updated_at, node_id) VALUES(?, ?, ?, ?, ?, ?)");
+const stmtUpdate = db.prepare("UPDATE items SET name = ?, value = ?, updated_at = ? WHERE id = ?");
+const stmtDelete = db.prepare("DELETE FROM items WHERE id = ?");
+const stmtReplace = db.prepare("INSERT OR REPLACE INTO items(id, name, value, created_at, updated_at, node_id) VALUES(?, ?, ?, ?, ?, ?)");
+const stmtList = db.prepare("SELECT id, name, value, created_at, updated_at, node_id FROM items ORDER BY created_at DESC LIMIT 100");
+const stmtGet = db.prepare("SELECT id, name, value, created_at, updated_at, node_id FROM items WHERE id = ?");
+const stmtCount = db.prepare("SELECT COUNT(*) as count FROM items");
+const stmtChanges = db.prepare("SELECT change_id, op, row_id, row_data FROM _changes ORDER BY change_id LIMIT 100");
+const stmtDeleteChanges = db.prepare("DELETE FROM _changes WHERE change_id <= ?");
+const stmtSyncOn = db.prepare("UPDATE _meta SET value = 1 WHERE key = 'syncing'");
+const stmtSyncOff = db.prepare("UPDATE _meta SET value = 0 WHERE key = 'syncing'");
+
 // --- Batch ship ---
-const COLS = ["id", "name", "value", "created_at", "updated_at", "node_id"];
-
-async function shipBatch(changes: any[]) {
+async function shipBatch(changes: unknown[]) {
 	if (!PEER_URL || changes.length === 0) return;
-
 	try {
 		const resp = await fetch(`${PEER_URL}/sync`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json", "X-Node-Id": ID },
 			body: JSON.stringify(changes),
 		});
-		if (!resp.ok) {
-			console.error(`[${ID}] ship failed: ${resp.status}`);
-		}
+		if (!resp.ok) console.error(`[${ID}] ship failed: ${resp.status}`);
 	} catch (e) {
 		console.error(`[${ID}] ship error:`, e);
 	}
 }
 
-// Poll _changes table every BATCH_MS, ship, delete shipped
+// Poll _changes every BATCH_MS
 setInterval(() => {
-	const rows = db.prepare("SELECT change_id, op, row_id, row_data FROM _changes ORDER BY change_id LIMIT 100").all() as any[];
-
+	const rows = stmtChanges.all() as { change_id: number; op: string; row_id: string; row_data: string | null }[];
 	if (rows.length === 0) return;
 
 	const changes = rows.map((r) => ({
@@ -138,113 +119,91 @@ setInterval(() => {
 		old_id: r.op === "DELETE" ? r.row_id : null,
 	}));
 
-	// Delete shipped rows
-	const lastId = rows[rows.length - 1].change_id;
-	db.prepare("DELETE FROM _changes WHERE change_id <= ?").run(lastId);
-
-	// Ship (async, don't block)
+	stmtDeleteChanges.run(rows[rows.length - 1].change_id);
 	shipBatch(changes);
 }, BATCH_MS);
 
 // --- Apply received changes ---
-function applyChanges(changes: any[]): number {
-	// Set syncing flag — triggers won't fire
-	db.prepare("UPDATE _meta SET value = 1 WHERE key = 'syncing'").run();
-
+function applyChanges(changes: { op: string; row: { id: string; name: string; value: number; created_at: number; updated_at: number; node_id: string } | null; old_id: string | null }[]): number {
+	stmtSyncOn.run();
 	let applied = 0;
 	try {
-		const insertReplace = db.prepare(
-			"INSERT OR REPLACE INTO items(id, name, value, created_at, updated_at, node_id) VALUES(?, ?, ?, ?, ?, ?)"
-		);
-		const deleteStmt = db.prepare("DELETE FROM items WHERE id = ?");
-
 		for (const c of changes) {
 			if (c.op === "INSERT" || c.op === "UPDATE") {
 				if (!c.row) continue;
 				const r = c.row;
-				insertReplace.run(
-					r.id, r.name, r.value,
-					r.created_at, r.updated_at, r.node_id
-				);
+				stmtReplace.run(r.id, r.name, r.value, r.created_at, r.updated_at, r.node_id);
 				applied++;
 			} else if (c.op === "DELETE") {
 				if (!c.old_id) continue;
-				deleteStmt.run(c.old_id);
+				stmtDelete.run(c.old_id);
 				applied++;
 			}
 		}
 	} finally {
-		// Clear syncing flag
-		db.prepare("UPDATE _meta SET value = 0 WHERE key = 'syncing'").run();
+		stmtSyncOff.run();
 	}
-
 	return applied;
 }
 
-
-// --- HTTP server (Bun.serve — native, not Node.js http.createServer) ---
+// --- HTTP server (Bun.serve native) ---
 const server = Bun.serve({
 	port: parseInt(LISTEN.replace(":", "")),
 	fetch(req) {
 		const url = new URL(req.url);
+		const method = req.method;
+		const path = url.pathname;
 
 		// POST /sync
-		if (req.method === "POST" && url.pathname === "/sync") {
-			return req.json().then((changes: any[]) => {
+		if (method === "POST" && path === "/sync") {
+			return req.json().then((changes: Parameters<typeof applyChanges>[0]) => {
 				const applied = applyChanges(changes);
 				return Response.json({ applied });
-			}).catch((e) => Response.json({ error: String(e) }, { status: 400 }));
+			}).catch((e: unknown) => Response.json({ error: String(e) }, { status: 400 }));
 		}
 
 		// GET /api/items
-		if (req.method === "GET" && url.pathname === "/api/items") {
-			const rows = db.prepare(
-				"SELECT id, name, value, created_at, updated_at, node_id FROM items ORDER BY created_at DESC LIMIT 100"
-			).all();
-			return Response.json(rows);
+		if (method === "GET" && path === "/api/items") {
+			return Response.json(stmtList.all());
 		}
 
 		// GET /api/items/:id
-		if (req.method === "GET" && url.pathname.startsWith("/api/items/")) {
-			const id = url.pathname.slice("/api/items/".length);
-			const row = db.prepare(
-				"SELECT id, name, value, created_at, updated_at, node_id FROM items WHERE id = ?"
-			).get(id);
+		if (method === "GET" && path.startsWith("/api/items/")) {
+			const id = path.slice("/api/items/".length);
+			const row = stmtGet.get(id);
 			return row ? Response.json(row) : Response.json({ error: "not found" }, { status: 404 });
 		}
 
 		// POST /api/items
-		if (req.method === "POST" && url.pathname === "/api/items") {
-			return req.json().then((body: any) => {
+		if (method === "POST" && path === "/api/items") {
+			return req.json().then((body: { name: string; value: number }) => {
 				const id = crypto.randomUUID();
 				const now = Date.now();
-				db.prepare(
-					"INSERT INTO items(id, name, value, created_at, updated_at, node_id) VALUES(?, ?, ?, ?, ?, ?)"
-				).run(id, body.name, body.value, now, now, ID);
+				stmtInsert.run(id, body.name, body.value, now, now, ID);
 				return Response.json({ id, name: body.name, value: body.value, created_at: now, node_id: ID });
-			}).catch((e) => Response.json({ error: String(e) }, { status: 500 }));
+			}).catch((e: unknown) => Response.json({ error: String(e) }, { status: 500 }));
 		}
 
 		// PUT /api/items/:id
-		if (req.method === "PUT" && url.pathname.startsWith("/api/items/")) {
-			const id = url.pathname.slice("/api/items/".length);
-			return req.json().then((body: any) => {
+		if (method === "PUT" && path.startsWith("/api/items/")) {
+			const id = path.slice("/api/items/".length);
+			return req.json().then((body: { name: string; value: number }) => {
 				const now = Date.now();
-				db.prepare("UPDATE items SET name = ?, value = ?, updated_at = ? WHERE id = ?").run(body.name, body.value, now, id);
+				stmtUpdate.run(body.name, body.value, now, id);
 				return Response.json({ id, name: body.name, value: body.value, updated_at: now });
-			}).catch((e) => Response.json({ error: String(e) }, { status: 500 }));
+			}).catch((e: unknown) => Response.json({ error: String(e) }, { status: 500 }));
 		}
 
 		// DELETE /api/items/:id
-		if (req.method === "DELETE" && url.pathname.startsWith("/api/items/")) {
-			const id = url.pathname.slice("/api/items/".length);
-			db.prepare("DELETE FROM items WHERE id = ?").run(id);
+		if (method === "DELETE" && path.startsWith("/api/items/")) {
+			const id = path.slice("/api/items/".length);
+			stmtDelete.run(id);
 			return Response.json({ deleted: id });
 		}
 
 		// GET /health
-		if (req.method === "GET" && url.pathname === "/health") {
-			const { count } = db.prepare("SELECT COUNT(*) as count FROM items").get() as any;
+		if (method === "GET" && path === "/health") {
+			const { count } = stmtCount.get() as { count: number };
 			return Response.json({ ok: true, node_id: ID, item_count: count });
 		}
 
