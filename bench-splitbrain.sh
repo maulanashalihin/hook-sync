@@ -26,10 +26,18 @@ LOG_B=/tmp/splitbrain_b.log
 RUNTIME="${1:-all}"
 
 # Per-runtime results (bash 3.2 compatible — no associative arrays)
-GO_PASS=0; GO_FAIL=0; GO_TOTAL=0
-BUN_PASS=0; BUN_FAIL=0; BUN_TOTAL=0
-NODE_PASS=0; NODE_FAIL=0; NODE_TOTAL=0
-GO_RAN=0; BUN_RAN=0; NODE_RAN=0
+GO_PASS=0
+GO_FAIL=0
+GO_TOTAL=0
+BUN_PASS=0
+BUN_FAIL=0
+BUN_TOTAL=0
+NODE_PASS=0
+NODE_FAIL=0
+NODE_TOTAL=0
+GO_RAN=0
+BUN_RAN=0
+NODE_RAN=0
 
 cleanup() {
 	pkill -9 -f "hook-sync-go|bun/server|node server" 2>/dev/null || true
@@ -275,9 +283,24 @@ run_splitbrain_test() {
 	echo ""
 	echo "  $upper Results: $PASS/$TOTAL passed, $FAIL failed"
 	case "$runtime" in
-		go)   GO_PASS=$PASS; GO_FAIL=$FAIL; GO_TOTAL=$TOTAL; GO_RAN=1 ;;
-		bun)  BUN_PASS=$PASS; BUN_FAIL=$FAIL; BUN_TOTAL=$TOTAL; BUN_RAN=1 ;;
-		node) NODE_PASS=$PASS; NODE_FAIL=$FAIL; NODE_TOTAL=$TOTAL; NODE_RAN=1 ;;
+	go)
+		GO_PASS=$PASS
+		GO_FAIL=$FAIL
+		GO_TOTAL=$TOTAL
+		GO_RAN=1
+		;;
+	bun)
+		BUN_PASS=$PASS
+		BUN_FAIL=$FAIL
+		BUN_TOTAL=$TOTAL
+		BUN_RAN=1
+		;;
+	node)
+		NODE_PASS=$PASS
+		NODE_FAIL=$FAIL
+		NODE_TOTAL=$TOTAL
+		NODE_RAN=1
+		;;
 	esac
 
 	cleanup
@@ -331,8 +354,8 @@ print_result() {
 	fi
 }
 
-[ "$GO_RAN" -eq 1 ]   && print_result "GO"   $GO_PASS   $GO_FAIL   $GO_TOTAL
-[ "$BUN_RAN" -eq 1 ]  && print_result "BUN"  $BUN_PASS  $BUN_FAIL  $BUN_TOTAL
+[ "$GO_RAN" -eq 1 ] && print_result "GO" $GO_PASS $GO_FAIL $GO_TOTAL
+[ "$BUN_RAN" -eq 1 ] && print_result "BUN" $BUN_PASS $BUN_FAIL $BUN_TOTAL
 [ "$NODE_RAN" -eq 1 ] && print_result "NODE" $NODE_PASS $NODE_FAIL $NODE_TOTAL
 
 echo ""

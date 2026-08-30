@@ -356,5 +356,3 @@ Batch 10,000:
 - `bench-hub.sh` — Dedicated hub benchmark, 1 Go hub + 3 edges (all 3 runtimes)
 - `bench-splitbrain.sh` — Split-brain safety test, partition + conflict + reconnect (all 3 runtimes)
 - `go/bench/` — Go direct SQLite benchmarks (UUID, throughput)
-- `tmp/bench-client/main.go` — Go HTTP benchmark client (used by cross-server Postgres comparison)
-- `tmp/pg-api/main.go` — Postgres HTTP API (for fair cross-server comparison)
