@@ -38,18 +38,22 @@ Multi-writer without UUID = data loss. Integer auto-increment collides across no
 
 ```
 hook-sync/
-├── PROTOCOL.md           # Wire protocol spec
-├── go/                   # Go implementation (Fiber + mattn/go-sqlite3)
-│   ├── main.go
-│   └── bench/            # Direct SQLite benchmarks
-├── bun/                  # Bun implementation (Bun.serve + bun:sqlite)
-│   └── server.ts
-├── node/                 # Node.js implementation (hyper-express + better-sqlite3)
-│   └── server.js
-├── bench-dual-ack.sh     # Dual-writer benchmark (all 3 runtimes)
-├── bench-hsync.js        # HTTP benchmark client
-├── bench-interval.js     # Batch interval optimization
-└── BENCHMARK-REPORT.md   # Full benchmark report
+├── PROTOCOL.md               # Wire protocol spec
+├── go/                       # Go implementation (Fiber + mattn/go-sqlite3)
+│   ├── main.go               #   single-table
+│   ├── multi/main.go         #   multi-table (items + categories)
+│   └── bench/                #   direct SQLite benchmarks
+├── bun/                      # Bun implementation (Bun.serve + bun:sqlite)
+│   ├── server.ts             #   single-table
+│   └── server-multi.ts       #   multi-table
+├── node/                     # Node.js implementation (hyper-express + better-sqlite3)
+│   ├── server.js             #   single-table
+│   └── server-multi.js       #   multi-table
+├── bench-dual-ack.sh         # Dual-writer benchmark (all 3 runtimes)
+├── bench-hsync.js            # HTTP benchmark client
+├── bench-interval.js         # Batch interval optimization
+├── bench-trigger-overhead.ts # Trigger overhead measurement
+└── BENCHMARK-REPORT.md       # Full benchmark report
 ```
 
 | Language | Capture | Binding | HTTP server |
@@ -162,6 +166,7 @@ Tested: peer unreachable → 5 retries with backoff → changes moved to `_dead_
 ## Verified
 
 - Go ↔ Go, Go ↔ Bun, Go ↔ Node, Bun ↔ Node bidirectional sync ✅
+- Multi-table sync (items + categories) across all runtime pairs ✅
 - ACK-based delivery: no data loss on ship failure ✅
 - Crash recovery: changes survive in `_changes`, sync resumes on restart ✅
 - Dead letter: 5 retries → `_dead_letter` table ✅
@@ -171,10 +176,9 @@ Tested: peer unreachable → 5 retries with backoff → changes moved to `_dead_
 
 ## Limitations (prototype)
 
-- **Single table** (`items`) — generalization needed for production
+- **Multi-table requires manual setup** — adding a table means writing triggers + updating applyChanges dispatch (see `go/multi/`, `bun/server-multi.ts`, `node/server-multi.js` for 2-table example)
 - **Hardcoded columns** — column names mapped by index in triggers
 - **Point-to-point** — no topology management (star, mesh, etc.)
-- **No multi-table sync** — schema changes require trigger updates
 - **Localhost benchmark variance** — HTTP throughput varies 3-8x on localhost; use real network for reliable comparison
 
 ## License
