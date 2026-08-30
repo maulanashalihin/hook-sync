@@ -37,16 +37,6 @@ Pure SQLite write speed with triggers firing. No HTTP, no network, no event loop
 
 bun:sqlite is fastest in raw SQLite — even with trigger overhead (1 extra INSERT per change), it beats Go and Node in transaction mode.
 
-### Trigger overhead (measured separately, Go)
-
-| Mode | Without triggers | With triggers | Overhead |
-|------|--------:|--------:|--------:|
-| Sequential | 466K QPS | 255K QPS | -45% |
-| Transaction | 1,247K QPS | 373K QPS | -70% |
-
-Trigger overhead is significant in direct SQLite. In HTTP benchmarks, HTTP overhead dominates — trigger effect is not measurable through HTTP.
-
----
 
 ## Sync Does Not Block Writes
 
