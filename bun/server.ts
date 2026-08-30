@@ -236,7 +236,7 @@ const server = createServer((req, res) => {
 		req.on("end", () => {
 			try {
 				const { name, value } = JSON.parse(body);
-				const id = uuidv7();
+				const id = crypto.randomUUID();
 				const now = Date.now();
 				db.prepare(
 					"INSERT INTO items(id, name, value, created_at, updated_at, node_id) VALUES(?, ?, ?, ?, ?, ?)"
