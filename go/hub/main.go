@@ -1,3 +1,54 @@
+// hook-sync-hub — dedicated relay node for star and multi-region topologies.
+//
+// ARCHITECTURE
+//
+//   The hub is a pure relay. It has no SQLite, no triggers, no /api/items endpoints.
+//   All data enters via POST /sync from edge nodes (or peer hubs in multi-region).
+//   The hub does two things:
+//
+//     1. BACKUP  — store every received change in Pebble KV under "data:{id}".
+//        This is the hub's full backup copy of all data. Not queryable via SQL,
+//        but scannable by key prefix ("data:" prefix → all rows).
+//
+//     2. FORWARD — relay every received change to all other edges (and peer hubs).
+//        Forwarding is asynchronous: the hub ACKs the sender immediately, then
+//        forwards in the background. If the hub crashes after ACK but before
+//        forward, the forwarding entry survives in Pebble ("fwd:{n}" key) and
+//        is replayed on restart.
+//
+//   Pebble KV stores two key namespaces:
+//     "data:{id}"  → row JSON (backup copy, INSERT/UPDATE sets, DELETE removes)
+//     "fwd:{n}"    → fwdEntry JSON (pending forward, one per edge per batch)
+//
+// LOOP PREVENTION (multi-region hub-to-hub)
+//
+//   In single-hub topology, no loop is possible: hub receives from edges,
+//   forwards to edges, edges don't re-ship received changes (syncing flag).
+//
+//   In multi-region topology, hubs peer directly. Hub A forwards to hub B,
+//   hub B would forward back to hub A → infinite loop. Prevention:
+//
+//     - Hub sends "X-Node-Url" header (its own URL, set via --url flag) with
+//       every forward request.
+//     - Receiving hub reads "X-Node-Url" and skips the edge whose URL matches.
+//     - Edge nodes don't send "X-Node-Url" (empty header), so the hub forwards
+//       to all edges normally.
+//
+//   Flow: edge1 → hub A (X-Node-Url: hubA-url) → hub B sees hubA-url, skips it,
+//   forwards to edge3, edge4. Hub B sends (X-Node-Url: hubB-url) → hub A sees
+//   hubB-url, skips it. No loop.
+//
+// CRASH RECOVERY
+//
+//   1. Hub receives /sync from edge → applyBackup (Pebble "data:{id}")
+//   2. enqueueForward (Pebble "fwd:{n}") — BEFORE ACK, so crash doesn't lose it
+//   3. ACK sender → edge deletes from its _changes
+//   4. tryForwardAll — immediate forward attempt (low latency)
+//   5. If hub crashes after step 3, before forward completes:
+//      - "fwd:{n}" entries survive in Pebble
+//      - On restart, replayPending logs count, forwardSweep picks them up
+//      - Edges eventually receive the changes — no data loss
+
 package main
 
 import (
@@ -53,7 +104,20 @@ func (e *edgeList) Set(v string) error {
 }
 
 // Hub is a dedicated relay node. No SQLite, no triggers, no /api/items.
-// All data enters via /sync. Pebble stores backup + durable forwarding queue.
+// All data enters via /sync. Pebble stores backup ("data:{id}") + durable
+// forwarding queue ("fwd:{n}"). See file header for full architecture.
+//
+// Fields:
+//   ID         — hub identifier (e.g. "hubA"), sent as X-Node-Id header
+//   Listen     — HTTP listen address (e.g. ":9010")
+//   MyURL      — this hub's full URL (e.g. "http://localhost:9010"), sent as
+//                X-Node-Url header for multi-region loop prevention. Empty in
+//                single-hub topology (no loop possible, header not needed).
+//   Edges      — list of edge node URLs (and peer hub URLs in multi-region).
+//                Hub forwards to every edge except the sender (matched by URL).
+//   pdb        — Pebble KV store (LSM tree, write-optimized)
+//   batchMs    — forward sweep interval (background retry loop)
+//   fwdCounter — monotonic counter for "fwd:{n}" keys (atomic, thread-safe)
 type Hub struct {
 	ID         string
 	Listen     string
@@ -105,8 +169,15 @@ func main() {
 }
 
 // applyBackup stores row data in Pebble under "data:{id}".
-// For DELETE, removes the key. This is the backup copy — not queryable via SQL,
-// but scannable by key prefix.
+//
+// This is the hub's backup copy of all data. Every received change is persisted
+// here before ACK, so the hub always has a complete backup even if forwarding
+// hasn't happened yet. Not queryable via SQL, but scannable by key prefix.
+//
+// INSERT/UPDATE: Set "data:{id}" → row JSON (overwrites previous value)
+// DELETE:        Delete "data:{id}" (removes from backup)
+//
+// Uses Pebble batch for atomicity — all changes in one commit.
 func (h *Hub) applyBackup(changes []Change) int {
 	applied := 0
 	batch := h.pdb.NewBatch()
@@ -138,9 +209,21 @@ func (h *Hub) applyBackup(changes []Change) int {
 	return applied
 }
 
-// enqueueForward puts a durable forwarding entry in Pebble for each edge.
-// Key: "fwd:{counter}" → value: fwdEntry JSON.
-// The entry survives hub crash. On restart, replayPending re-sends.
+// enqueueForward creates a durable forwarding entry in Pebble for each edge.
+//
+// For every edge (except the sender), a "fwd:{n}" entry is written to Pebble
+// BEFORE the sender is ACKed. This guarantees no data loss: if the hub crashes
+// after ACK but before forward, the entries survive and are replayed on restart.
+//
+// Loop prevention: senderURL is the X-Node-Url header from the incoming request.
+// If edgeURL matches senderURL, we skip — don't forward back to the sender.
+// This is what prevents infinite loops in multi-region hub-to-hub topology.
+// Edge nodes don't send X-Node-Url (empty string), so they never match and are
+// always forwarded to. Peer hubs send their URL, which matches their entry in
+// the Edges list, so they're skipped.
+//
+// Key:   "fwd:{counter}" (monotonic, atomic counter)
+// Value: fwdEntry JSON ({batch_id, changes, edge_url})
 func (h *Hub) enqueueForward(batchID int64, changes []Change, senderURL string) {
 	for _, edgeURL := range h.Edges {
 		if edgeURL == senderURL {
@@ -156,7 +239,16 @@ func (h *Hub) enqueueForward(batchID int64, changes []Change, senderURL string) 
 	}
 }
 
-// forwardOne sends changes to an edge and returns true on ACK match.
+// forwardOne sends a batch of changes to one edge via POST /sync.
+//
+// Headers:
+//   X-Node-Id  — this hub's ID (always sent)
+//   X-Node-Url — this hub's URL (only if --url flag is set, for multi-region
+//                loop prevention; empty in single-hub topology)
+//
+// Returns true only if the edge ACKed with matching batch_id. Any network
+// error, non-200 status, or ACK mismatch returns false — the fwd: entry stays
+// in Pebble and forwardSweep will retry.
 func (h *Hub) forwardOne(edgeURL string, batchID int64, changes []Change) bool {
 	reqBody := SyncRequest{BatchID: batchID, Changes: changes}
 	data, err := json.Marshal(reqBody)
@@ -189,8 +281,17 @@ func (h *Hub) forwardOne(edgeURL string, batchID int64, changes []Change) bool {
 	return sr.Ack == batchID
 }
 
-// tryForwardAll attempts immediate forwarding of all pending fwd: entries.
-// Called after each /sync receive for low latency.
+// tryForwardAll attempts immediate forwarding of all pending "fwd:" entries.
+//
+// Called asynchronously after each /sync receive for low latency — the sender
+// is already ACKed, so this is best-effort. Iterates all "fwd:{n}" keys in
+// Pebble, tries to forward each one, and deletes entries that succeeded.
+//
+// Entries that fail (edge down, network error) remain in Pebble and are
+// retried by forwardSweep (background ticker) on the next tick.
+//
+// Key range: "fwd:" to "fwd~" ("~" is the next ASCII char after ":", so this
+// is an exclusive upper bound that captures all "fwd:*" keys).
 func (h *Hub) tryForwardAll() {
 	iter, err := h.pdb.NewIter(&pebble.IterOptions{
 		LowerBound: []byte("fwd:"),
@@ -222,8 +323,21 @@ func (h *Hub) tryForwardAll() {
 	}
 }
 
-// forwardSweep runs in background. Retries pending forwards periodically.
-// Picks up entries that failed immediate forward (edge was down).
+// forwardSweep is the background retry loop for pending forwards.
+//
+// Runs every batchMs (default 50ms). On each tick:
+//   1. Scan all "fwd:{n}" entries in Pebble
+//   2. For each entry, try to forward with exponential backoff (50/100/200/400/800ms)
+//   3. Delete entries that succeeded (ACK matched)
+//
+// This picks up entries that failed tryForwardAll (edge was down, network error).
+// Forwards to all pending edges concurrently (goroutine per entry, WaitGroup
+// barrier). Entries that exhaust all 5 backoff attempts stay in Pebble for the
+// next tick — they're never dropped, only deleted on successful ACK.
+//
+// This is the crash recovery mechanism: if hub crashes and restarts,
+// replayPending logs the count, then forwardSweep picks up all pending entries
+// on the next tick and retries.
 func (h *Hub) forwardSweep() {
 	ticker := time.NewTicker(time.Duration(h.batchMs) * time.Millisecond)
 	defer ticker.Stop()
@@ -287,7 +401,13 @@ func (h *Hub) forwardSweep() {
 	}
 }
 
-// replayPending re-sends all fwd: entries on startup (crash recovery).
+// replayPending counts pending "fwd:" entries on startup (crash recovery).
+//
+// Called once before forwardSweep starts. If the hub crashed with pending
+// forwards, they survive in Pebble. This function just logs the count —
+// forwardSweep (started immediately after) picks them up on the next tick
+// and retries. No special replay logic needed: the entries are already in
+// Pebble, forwardSweep already iterates them, so crash recovery is automatic.
 func (h *Hub) replayPending() {
 	iter, err := h.pdb.NewIter(&pebble.IterOptions{
 		LowerBound: []byte("fwd:"),
@@ -309,6 +429,22 @@ func (h *Hub) replayPending() {
 	// forwardSweep will pick them up on next tick.
 }
 
+// startHTTP launches the Fiber HTTP server with two endpoints:
+//
+//   POST /sync — the only data ingress. Receives changes from edges or peer hubs.
+//     Pipeline (see file header for full flow):
+//       1. applyBackup    — persist to Pebble "data:{id}"
+//       2. enqueueForward — persist "fwd:{n}" for each edge (except sender)
+//       3. ACK            — return {applied, ack: batch_id} immediately
+//       4. tryForwardAll  — async, best-effort immediate forward
+//
+//     The X-Node-Url header is read for loop prevention (multi-region).
+//     Empty header = request from edge node (forward to all edges).
+//     Non-empty    = request from peer hub (skip the edge matching sender URL).
+//
+//   GET /health — hub status for monitoring and benchmarks.
+//     Returns: backup_items (data: count), pending_forwards (fwd: count),
+//     edges list, node_id, hub=true flag.
 func (h *Hub) startHTTP() {
 	app := fiber.New(fiber.Config{
 		DisableStartupMessage: true,
