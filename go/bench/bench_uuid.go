@@ -14,16 +14,9 @@ import (
 // Tests: sequential insert, transaction batch insert
 // Measures: QPS, insert time
 
-func main() {
-	db, err := sql.Open("sqlite3", "bench_uuid.db?_journal_mode=WAL&_synchronous=NORMAL&_busy_timeout=5000")
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer db.Close()
-	db.SetMaxOpenConns(1)
-
+func benchUUID(db *sql.DB) {
 	// Schema: TEXT PRIMARY KEY (same as hook-sync prototype)
-	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS items (
+	_, err := db.Exec(`CREATE TABLE IF NOT EXISTS items (
 		id TEXT PRIMARY KEY, name TEXT, value INTEGER,
 		created_at INTEGER, updated_at INTEGER, node_id TEXT
 	)`)

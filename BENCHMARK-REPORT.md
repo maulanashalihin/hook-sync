@@ -25,18 +25,6 @@ HTTP throughput on localhost varies 3-5x across runs (loopback artifact, not run
 
 ---
 
-## Direct SQLite (10K writes, no HTTP)
-
-Pure SQLite write speed with triggers firing. No HTTP, no network, no event loop overhead. This is the reliable benchmark.
-
-| Runtime | Sequential | Transaction | Triggers fired |
-|---------|--------:|--------:|---:|
-| Go | 255K QPS | 373K QPS | 10,000 ✅ |
-| Node | 307K QPS | 354K QPS | 10,000 ✅ |
-| Bun | 339K QPS | **394K QPS** | 10,000 ✅ |
-
-bun:sqlite is fastest in raw SQLite — even with trigger overhead (1 extra INSERT per change), it beats Go and Node in transaction mode.
-
 
 ## Sync Does Not Block Writes
 
@@ -280,23 +268,22 @@ Same servers, same durability settings. Batch endpoint: 1 HTTP request contains 
 | 1,000 | 31,429 QPS | 23,682 QPS | +32.7% |
 | 10,000 | 31,558 QPS | 8,278 QPS | **+3.8x** |
 
-**hook-sync plateaus at ~31K QPS** (batch 1,000 and 10,000 identical). That's the HTTP server + JSON parsing ceiling — not SQLite. SQLite raw is 394K QPS, still far above.
+**hook-sync plateaus at ~31K QPS** (batch 1,000 and 10,000 identical). That's the HTTP server + JSON parsing ceiling.
 
 **Postgres degrades at batch 10,000** — drops from 23,682 to 8,278 QPS (-65%). Single transaction with 10,000 INSERTs is too large: WAL buffer fills, lock contention, MVCC overhead. Postgres optimal at batch 100-1,000, degrades after.
 
 Why SQLite wins more as batch grows: SQLite transaction = N INSERTs in 1 WAL flush, lightweight per-query (no query planner, no MVCC visibility check, no connection pool round-trip per Exec). Postgres has heavier per-query overhead that compounds in large transactions.
 
-### Scaling: single vs batch vs direct
+### Scaling: single vs batch
 
 | Mode | hook-sync | Postgres | SQLite advantage |
 |------|--------:|--------:|--------:|
-| Direct (no HTTP) | 394K QPS | ~12K TPS | 33x |
 | Batch 10,000 (1 req) | 31,558 QPS | 8,278 QPS | 3.8x |
 | Batch 1,000 (1 req) | 31,429 QPS | 23,682 QPS | +32.7% |
 | Batch 100 (1 req) | 27,366 QPS | 22,703 QPS | +20.5% |
 | Single (1 req = 1 write) | 6,065 QPS | 6,238 QPS | tie |
 
-As HTTP overhead decreases (larger batch), SQLite advantage increases. Direct SQLite is 33x faster than Postgres — the gap is hidden by HTTP overhead in single-write mode.
+As HTTP overhead decreases (larger batch), SQLite advantage increases.
 
 ### All QPS data
 
@@ -322,4 +309,4 @@ Batch 10,000:
 - `bench-fullmesh.sh` — Full mesh benchmark, 4 nodes all-to-all (all 3 runtimes)
 - `bench-hub.sh` — Dedicated hub benchmark, 1 Go hub + 3 edges (all 3 runtimes)
 - `bench-splitbrain.sh` — Split-brain safety test, partition + conflict + reconnect (all 3 runtimes)
-- `go/bench/` — Go direct SQLite benchmarks (UUID, throughput)
+- `bench-trigger.sh` — Trigger overhead test via HTTP (baseline vs with triggers, Go)

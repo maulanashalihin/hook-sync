@@ -45,6 +45,7 @@ type Node struct {
 	db            *sql.DB
 	batchInterval time.Duration
 	batchSize     int
+	noTrigger     bool
 }
 
 func main() {
@@ -54,6 +55,7 @@ func main() {
 		listen  = flag.String("listen", "", "HTTP listen address (e.g. :9001)")
 		batchSize = flag.Int("batch-size", 10000, "max changes per ship batch")
 		batchMs = flag.Int("batch-ms", 50, "batch ship interval in milliseconds")
+		noTrigger = flag.Bool("no-trigger", false, "disable triggers and sync (baseline for bench)")
 		peerURL = flag.String("peer", "", "peer URL (e.g. http://localhost:9002)")
 	)
 	flag.Parse()
@@ -68,12 +70,14 @@ func main() {
 		Listen:        *listen,
 		batchSize:     *batchSize,
 		batchInterval: time.Duration(*batchMs) * time.Millisecond,
-		PeerURL:       *peerURL,
+		noTrigger:     *noTrigger,
 	}
 
 	node.initDB()
 	node.setupSchema()
-	go node.batchShip()
+	if !node.noTrigger {
+		go node.batchShip()
+	}
 	node.startHTTP()
 
 	log.Printf("[%s] listening on %s, peer=%s", *id, *listen, *peerURL)
@@ -91,6 +95,17 @@ func (n *Node) initDB() {
 }
 
 func (n *Node) setupSchema() {
+	if n.noTrigger {
+		// Baseline: items table only, no triggers, no _changes, no sync tables
+		_, err := n.db.Exec(`CREATE TABLE IF NOT EXISTS items (
+			id TEXT PRIMARY KEY, name TEXT, value INTEGER,
+			created_at INTEGER, updated_at INTEGER, node_id TEXT
+		)`)
+		if err != nil {
+			log.Fatalf("setup schema (no-trigger): %v", err)
+		}
+		return
+	}
 	_, err := n.db.Exec(`
 		CREATE TABLE IF NOT EXISTS items (
 			id TEXT PRIMARY KEY,

@@ -2,7 +2,7 @@
 
 > SQLite replication that just works. Multi-server, multi-writer, multi-runtime. Zero data loss.
 
-SQLite is the fastest database in the world — 394K QPS in raw mode, zero config, single file. But it can't replicate. Until now.
+SQLite is the fastest database in the world — zero config, single file, serverless. But it can't replicate. Until now.
 
 hook-sync adds replication to SQLite via triggers + HTTP sync. No consensus algorithm. No Raft. No coordinator. Just triggers, ACK, and UUID. The result: **3.8x faster than Postgres at batch 10K**, with multi-writer active-active, crash recovery, and split-brain safety — all in a single binary.
 
@@ -92,7 +92,6 @@ hook-sync/
 │   ├── mesh/main.go          #   full mesh (multi-peer, per-peer watermark)
 │   ├── hub/main.go           #   dedicated hub (Pebble KV, star topology relay)
 │   ├── multitable/main.go    #   multi-table (items + categories)
-│   └── bench/                #   direct SQLite benchmarks
 ├── bun/                      # Bun implementation (Bun.serve + bun:sqlite)
 │   ├── server.ts             #   single-table, point-to-point
 │   ├── server-mesh.ts        #   full mesh (multi-peer, per-peer watermark)
@@ -272,16 +271,6 @@ Benchmark script: `bash bench-fullmesh.sh`
 150 concurrent writes per run (50 to each of 3 edges). Integrity: all 3 edges have equal item count (750 per edge), hub backup count matches edges, 0 pending changes, 0 pending forwards, 0 dead letter after each run. Hub is always Go (Pebble KV).
 
 Benchmark script: `bash bench-hub.sh`
-
-### Direct SQLite (10K writes, no HTTP)
-
-| Runtime | Sequential | Transaction |
-|---------|--------:|--------:|
-| Go | 255K QPS | 373K QPS |
-| Node | 307K QPS | 354K QPS |
-| Bun | 339K QPS | **394K QPS** |
-
-bun:sqlite is fastest in raw SQLite — even with trigger overhead (1 extra INSERT per change), it beats Go and Node in transaction mode.
 
 ### Sync does not block writes
 
