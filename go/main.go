@@ -355,6 +355,38 @@ func (n *Node) startHTTP() {
 		})
 	})
 
+	// POST /api/items/batch — create multiple items in one transaction
+	app.Post("/api/items/batch", func(c *fiber.Ctx) error {
+		var items []struct {
+			Name  string `json:"name"`
+			Value int    `json:"value"`
+		}
+		if err := c.BodyParser(&items); err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+		}
+
+		tx, err := n.db.Begin()
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+		}
+		now := time.Now().UnixMilli()
+		for _, item := range items {
+			id, _ := uuid.NewV7()
+			_, err := tx.Exec(
+				"INSERT INTO items(id, name, value, created_at, updated_at, node_id) VALUES(?, ?, ?, ?, ?, ?)",
+				id.String(), item.Name, item.Value, now, now, n.ID,
+			)
+			if err != nil {
+				tx.Rollback()
+				return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+			}
+		}
+		if err := tx.Commit(); err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+		}
+		return c.JSON(fiber.Map{"created": len(items)})
+	})
+
 	// PUT /api/items/:id — update item (local write)
 	app.Put("/api/items/:id", func(c *fiber.Ctx) error {
 		id := c.Params("id")

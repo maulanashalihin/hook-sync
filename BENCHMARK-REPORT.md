@@ -191,7 +191,37 @@ Postgres default durability (unfair):
   Postgres  (synchronous_commit=on, replica):   4416, 4263, 4719, 4148, 4187, 4334, 4431, 4515, 4377, 4005
 ```
 
+### Batch mode: HTTP overhead bypass (1 request = 100 writes)
+
+Same servers, same durability settings. Batch endpoint: 1 HTTP request contains 100 items, inserted in single transaction. 10 runs × 100 batch-requests × 100 writes = 100K writes/run.
+
+| System | QPS median | QPS min | QPS max | vs single-write |
+|--------|--------:|--------:|--------:|:----------------:|
+| hook-sync (SQLite) | **27,366** | 25,095 | 30,604 | 4.5x faster |
+| Postgres | 22,703 | 21,448 | 27,302 | 3.6x faster |
+
+**hook-sync +20.5% faster than Postgres** in batch mode. SQLite advantage appears when HTTP overhead is distributed across multiple writes per request.
+
+Why: in single-write mode, HTTP overhead (~0.16ms/req) dominates — DB write time is negligible. In batch mode, HTTP overhead is amortized across 100 writes, so DB write time becomes significant. SQLite transaction = 100 INSERTs in 1 WAL flush, lighter per-query overhead than Postgres (no query planner, no MVCC visibility check, no connection pool round-trip per Exec).
+
+```
+Batch mode QPS:
+  hook-sync:  30604, 25765, 25870, 26166, 29858, 30093, 25095, 27366, 30483, 27106
+  Postgres:   21448, 22124, 25084, 24103, 22210, 22326, 22703, 22588, 26814, 27302
+```
+
+### Scaling: single vs batch vs direct
+
+| Mode | hook-sync | Postgres | SQLite advantage |
+|------|--------:|--------:|--------:|
+| Direct (no HTTP) | 394K QPS | ~12K TPS | 33x |
+| Batch (1 req = 100 writes) | 27,366 QPS | 22,703 QPS | +20.5% |
+| Single (1 req = 1 write) | 6,065 QPS | 6,238 QPS | tie (HTTP dominates) |
+
+As HTTP overhead decreases (batch), SQLite advantage increases. Direct SQLite is 33x faster than Postgres — the gap is hidden by HTTP overhead in single-write mode.
+
 ---
+
 
 ## What This Benchmark Does NOT Tell You
 
