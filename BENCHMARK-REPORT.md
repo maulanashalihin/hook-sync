@@ -334,6 +334,160 @@ Batch 10,000:
 ```
 
 
+## Trigger Overhead: Direct SQLite (no HTTP)
+
+**Date:** 2026-08-31
+**Methodology:** 100K INSERTs per run, 10 runs, single transaction, WAL mode, synchronous=NORMAL. Direct SQLite — no HTTP layer. Baseline = no triggers, no `_changes` table. Triggers = production hook-sync schema (INSERT trigger + `_changes` + `json_object()`).
+
+| Runtime | Driver | Baseline QPS | Triggers QPS | Overhead |
+|---------|--------|--------:|--------:|--------:|
+| Go | mattn/go-sqlite3 (CGO) | 317,260 | 105,070 | **-66.9%** |
+| Go | modernc.org/sqlite (pure Go) | 272,610 | 73,101 | **-73.2%** |
+| Bun | bun:sqlite (native) | 425,493 | 149,222 | **-64.9%** |
+| Node | better-sqlite3 (N-API) | 469,483 | 199,468 | **-57.5%** |
+**Trigger overhead is consistent ~58-73% across all runtimes/drivers.** Every INSERT with trigger = 2x B-tree write (items + `_changes`) + `json_object()` per row. modernc (pure Go, no CGO) is 14% slower at baseline and 30% slower at triggers vs mattn (CGO) — transpiled C via ccgo is slower than native C compilation.
+
+### Why HTTP benchmark (bench-trigger.sh) showed no overhead
+
+`bench-trigger.sh` measures through HTTP (200 concurrent requests). HTTP layer ceiling ~16K QPS — 6-12x lower than SQLite's 105K-199K QPS with triggers. HTTP parsing + JSON marshal + TCP connection handling dominates. Trigger overhead is buried under HTTP noise. Direct SQLite benchmark is the valid measurement.
+
+### Cross-runtime ranking
+
+Baseline: Node (469K) > Bun (425K) > Go/mattn (317K) > Go/modernc (272K). better-sqlite3 and bun:sqlite have lower per-call overhead than CGO mattn/go-sqlite3. modernc (pure Go, transpiled C) is slowest — no CGO but ccgo overhead.
+
+Triggers: same ranking — Node (199K) > Bun (149K) > Go/mattn (105K) > Go/modernc (73K). Overhead is proportional.
+
+
+### preupdate_hook vs triggers (Go only, direct SQLite)
+
+Also benchmarked preupdate_hook (CGO callback) as alternative to SQL triggers. 100K INSERTs, 10 runs, direct SQLite.
+
+| Mode | QPS median | vs baseline | Capture target |
+|------|--------:|--------:|--------|
+| baseline | 236,860 | — | No capture |
+| triggers | 79,090 | -67% | `_changes` (same txn) |
+| preupdate_hook (mem) | 175,088 | -26% | In-memory (no DB) |
+| preupdate_hook + Pebble | 139,059 | -41% | Pebble LSM (batch) |
+
+**Fair comparison (both persist change records): preupdate_hook + Pebble wins by 76%** (139K vs 79K QPS).
+
+- Hook callback alone (CGO trampoline + `data.New()`): -26% overhead
+- Pebble batch write additional: -21% (LSM append-only, no B-tree page split)
+- Triggers: -67% (same-transaction B-tree write + WAL sync per row)
+
+Tradeoff: preupdate_hook + Pebble (channel per-row) is not same-transaction. If write transaction rolls back, Pebble already has data → needs cleanup.
+
+### preupdate_hook + commit/rollback + Pebble (same-txn safe, Go only)
+
+Solved the same-transaction problem with `RegisterCommitHook` + `RegisterRollbackHook`:
+
+```
+preupdate_hook  →  in-memory slice (pending)
+commit_hook     →  batch flush to Pebble (1 batch.Commit)
+rollback_hook   →  discard slice (no false positives)
+```
+
+| Mode | QPS median | vs baseline | Same-txn safe? |
+|------|--------:|--------:|--------|
+| baseline | 236,664 | — | N/A |
+| triggers | 80,693 | -66% | Yes (SQL) |
+| **hook+commit+pebble** | **152,521** | **-36%** | **Yes (commit hook)** |
+| hook+commit+pebble (rollback test) | 117,397 | -50% | Yes (verified) |
+
+**hook+commit+pebble wins by 89%** (152K vs 81K QPS) — and same-transaction safe.
+
+Rollback test: 50% of batches rolled back, 50% committed. Verified: `commit_count == pebble_count == items_count`, `rollback_count == discarded pending`. Zero false positives in Pebble.
+
+Faster than channel-based preupdate+Pebble (152K vs 139K) because: in-memory slice append (no channel) → single `batch.Commit()` at commit hook (not per-row Set).
+
+**Protocol design:**
+- preupdate_hook captures to in-memory (Go-only, CGO)
+- commit_hook flushes to Pebble LSM (batch, write-optimized)
+- rollback_hook discards (same-txn safety, no false positives)
+- sync reads from Pebble iterator → HTTP ship to peers (same protocol)
+- ACK deletes from Pebble after all peers ACK (same logic as `_changes`)
+
+**Tradeoffs:**
+- Go-only (preupdate_hook + commit/rollback hooks are CGO bindings). Bun/Node would use triggers + `_changes` (hybrid)
+- Pebble not SQL-queryable (sync reads via iterator, not SELECT)
+- 89% faster than triggers for write-heavy workloads
+
+Run with: `go build -tags sqlite_preupdate_hook -o /tmp/hook-commit-pebble ./go/bench/hook_commit_pebble/main.go && /tmp/hook-commit-pebble`
+
+---
+
+## Replication Benchmark: Trigger vs Hook+Pebble vs Hook+Memory (2-node, 100K writes)
+
+**Date:** 2026-08-31
+**Methodology:** 2-node replication, 5 runs × 100K batch writes per run (500K total). Write 100K items via `POST /api/items/batch` to node A, wait for convergence (item_count match + pending=0 on both nodes). Measure write QPS, converge time, integrity.
+
+| Mode | QPS median | QPS min | QPS max | Converge median | Pass |
+|------|--------:|--------:|--------:|----------------:|:----:|
+| Trigger (SQL triggers + `_changes` table) | 116K | 30K | 133K | 4s | 5/5 |
+| Hook+Pebble (preupdate_hook + commit_hook + Pebble batch) | 168K | 160K | 172K | 2s | 5/5 |
+| Hook+Memory (preupdate_hook + in-memory slice, no persistence) | 186K | 184K | 192K | 1s | 5/5 |
+
+### Architecture comparison
+
+| | Trigger | Hook+Pebble | Hook+Memory |
+|---|---|---|---|
+| Capture mechanism | SQL AFTER INSERT/UPDATE/DELETE trigger | preupdate_hook (CGO callback) | preupdate_hook (CGO callback) |
+| Change store | `_changes` table (SQLite B-tree) | Pebble LSM (batch commit) | In-memory slice |
+| Same-txn safety | Yes (SQL trigger, same transaction) | Yes (commit_hook flush, rollback_hook discard) | No (crash = lost pending) |
+| Crash recovery | Yes (`_changes` survives in DB file) | Yes (Pebble survives on disk) | No (in-memory only) |
+| Cross-runtime | Go, Bun, Node (all have triggers) | Go-only (CGO preupdate_hook) | Go-only (CGO preupdate_hook) |
+| Write overhead | -67% (2x B-tree write + json_object per row) | -29% (in-memory collect + 1 Pebble batch) | -21% (in-memory collect only) |
+| Sync read | `SELECT FROM _changes` | Pebble iterator (`seq:` prefix) | Slice drain (mutex) |
+
+### Key findings
+
+- **Hook+Memory fastest (186K QPS)** — 1.6x trigger, 1.1x hook+pebble. No I/O for change capture. But no crash recovery.
+- **Hook+Pebble best production choice (168K QPS)** — 1.4x trigger, persistent, same-txn safe. Pebble overhead vs in-memory only ~10%.
+- **Trigger slowest and noisiest (116K median, 30K-133K range)** — `_changes` table bloats across runs (500K rows accumulated), degrades performance. Hook-based modes stable (160K-192K range).
+- **Converge: memory 1s, pebble 2s, trigger 4s** — hook-based sync drains faster (no SQL SELECT overhead, iterator/slice is faster than table scan).
+- **All 15/15 PASS** — integrity verified: item_count match, pending=0 on both nodes, every run.
+
+### When to use which
+
+- **Hook+Pebble** — production, write-heavy, needs crash recovery. Go-only.
+- **Hook+Memory** — max throughput, ephemeral, can tolerate loss on crash. Go-only.
+- **Trigger** — cross-runtime (Bun, Node), simpler, no CGO dependency.
+
+Run with: `bash bench-hookpebble-vs-trigger.sh`
+
+---
+
+## Split-Brain Safety: Trigger vs Hook+Pebble vs Hook+Memory
+
+**Date:** 2026-08-31
+**Methodology:** Same 6-phase split-brain test as `bench-splitbrain.sh`, but across 3 capture modes instead of 3 runtimes. Tests partition + independent writes + reconnect convergence + DELETE vs UPDATE conflict.
+
+| Mode | Checks | Passed | Result |
+|------|------:|------:|:---------:|
+| Trigger | 12 | 12 | ✅ PASS |
+| Hook+Pebble | 12 | 12 | ✅ PASS |
+| Hook+Memory | 6 | 12 | ❌ FAIL (expected — no crash recovery) |
+| **Total** | **36** | **30** | **Hook+Pebble matches Trigger** |
+
+### Why Hook+Memory fails (expected)
+
+hookmem stores pending changes in-memory only. Phase 2 kills both nodes → pending changes lost. On reconnect, nodes cannot sync partition-time writes that were never shipped. This is the known tradeoff: max throughput (186K QPS) but no crash recovery.
+
+Failures: shared item diverges (nodeA=100, nodeB=200), new items not merged (only_on_A / only_on_B missing), DELETE vs UPDATE disagrees.
+
+### Bug found and fixed: DELETE sync missing row data
+
+Initial run: Hook+Pebble failed Phase 6 (DELETE vs UPDATE). Root cause: `drainAndShip` only set `OldID` for DELETE, left `Row` nil. `applyChanges` skipped timestamp check (`c.Row != nil` was false) → DELETE always won, ignoring newer UPDATE.
+
+Fix: always populate `c.Row` from `rowData` for all ops, including DELETE. Now UPDATE with newer timestamp wins over DELETE — same behavior as trigger.
+
+### Conflict resolution (all modes that pass)
+
+Same as trigger-based: last-write-wins by `updated_at` timestamp. INSERT = safe (UUID, no collision). UPDATE vs UPDATE = higher timestamp wins. DELETE vs UPDATE = UPDATE wins if newer.
+
+Run with: `bash bench-splitbrain-hook.sh` (all modes) or `bash bench-splitbrain-hook.sh hookpebble` (single mode)
+
+---
 ## Files
 
 - `bench-all.sh` — Run ALL benchmarks in one command (all topologies, all runtimes)
@@ -341,5 +495,15 @@ Batch 10,000:
 - `bench-fullmesh.sh` — Full mesh benchmark, 4 nodes all-to-all (all 3 runtimes)
 - `bench-hub.sh` — Dedicated hub benchmark, 1 Go hub + 3 edges (all 3 runtimes)
 - `bench-splitbrain.sh` — Split-brain safety test, partition + conflict + reconnect (all 3 runtimes)
-- `bench-trigger.sh` — Trigger overhead test via HTTP (baseline vs with triggers, Go)
+- `bench-trigger.sh` — Trigger overhead test via HTTP (baseline vs with triggers, Go) — noisy, see direct SQLite benchmark above
+- `bench-hookpebble-vs-trigger.sh` — Replication benchmark: trigger vs hook+pebble vs hook+memory (2-node, 100K batch writes)
+- `bench-splitbrain-hook.sh` — Split-brain safety test across capture modes (trigger, hookpebble, hookmem)
+- `go/hookpebble/main.go` — Full Go server: preupdate_hook + commit_hook + rollback_hook + Pebble (build tag: `sqlite_preupdate_hook`)
+- `go/hookmem/main.go` — Full Go server: preupdate_hook + in-memory slice, no persistence (build tag: `sqlite_preupdate_hook`)
 - `bench-stress.sh` — Volume stress test, 10K/100K/500K items (convergence + persistence + consistency, all 3 runtimes)
+- `go/bench/baseline_vs_trigger/main.go` — Direct SQLite trigger overhead (Go, no HTTP)
+- `bun/bench-baseline-vs-trigger.ts` — Direct SQLite trigger overhead (Bun, no HTTP)
+- `node/bench-baseline-vs-trigger.js` — Direct SQLite trigger overhead (Node, no HTTP)
+- `go/bench/baseline_vs_trigger_modernc/main.go` — Direct SQLite trigger overhead (Go + modernc.org/sqlite, pure Go, no CGO)
+- `go/bench/hook_vs_trigger/main.go` — preupdate_hook vs triggers vs Pebble (Go, direct SQLite, build tag: `sqlite_preupdate_hook`)
+- `go/bench/hook_commit_pebble/main.go` — preupdate_hook + commit/rollback + Pebble (same-txn safe, Go, build tag: `sqlite_preupdate_hook`)

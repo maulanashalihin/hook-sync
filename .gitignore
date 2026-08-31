@@ -1,9 +1,7 @@
 *.db
 *.db-shm
 *.db-wal
-hook-sync
-hook-sync-mesh-go
-hook-sync-hub
+hook-sync-*
 *.pebble/
 node_modules/
 /tmp/
