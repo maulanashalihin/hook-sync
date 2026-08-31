@@ -2,7 +2,7 @@
 
 > SQLite replication that just works. Multi-server, multi-writer, multi-runtime. Zero data loss.
 
-SQLite is the fastest database in the world — zero config, single file, serverless. But it can't replicate. Until now.
+SQLite is the fastest SQL database in the world — zero config, single file, serverless. But it can't replicate. Until now.
 
 hook-sync adds replication to SQLite via triggers + HTTP sync. No consensus algorithm. No Raft. No coordinator. Just triggers, ACK, and UUID. The result: **3.8x faster than Postgres at batch 10K**, with multi-writer active-active, crash recovery, and split-brain safety — all in a single binary.
 
