@@ -1,5 +1,5 @@
 {
-  "name": "hook-sync",
+  "name": "@maulanashalihin/hook-sync",
   "version": "0.1.0",
   "description": "SQLite replication library — trigger-based change capture, ACK-based sync, last-write-wins conflict resolution. Works with bun:sqlite and better-sqlite3.",
   "type": "module",
