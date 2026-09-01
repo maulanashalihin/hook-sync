@@ -1,0 +1,989 @@
+---
+---
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="description" content="SQLite replication that just works. Multi-server, multi-writer, multi-runtime. Zero data loss." />
+  <meta property="og:title" content="hook-sync" />
+  <meta property="og:description" content="SQLite replication that just works. Multi-server, multi-writer, multi-runtime. Zero data loss." />
+  <meta property="og:type" content="website" />
+  <meta property="og:url" content="https://hook-sync.pages.dev" />
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+  <title>hook-sync — SQLite replication that just works</title>
+  <style>
+/* ═══════════════════════════════════════════════════════════════
+   Reset & Base
+   ═══════════════════════════════════════════════════════════════ */
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+:root {
+  --bg: #0a0e14;
+  --bg-2: #0f141c;
+  --bg-3: #161b22;
+  --bg-card: #111720;
+  --text: #e6edf3;
+  --text-2: #8b949e;
+  --text-3: #6e7681;
+  --accent: #00d4aa;
+  --accent-2: #00a3ff;
+  --accent-glow: rgba(0, 212, 170, 0.15);
+  --border: #1e2530;
+  --border-2: #2a3040;
+  --mono: 'JetBrains Mono', 'SF Mono', 'Fira Code', Consolas, monospace;
+  --sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+
+html { scroll-behavior: smooth; }
+
+body {
+  font-family: var(--sans);
+  background: var(--bg);
+  color: var(--text);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  letter-spacing: -0.01em;
+  overflow-x: hidden;
+}
+
+a { color: inherit; text-decoration: none; }
+
+::selection { background: rgba(0, 212, 170, 0.25); }
+
+::-webkit-scrollbar { width: 10px; }
+::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar-thumb { background: var(--border-2); border-radius: 5px; border: 2px solid var(--bg); }
+
+/* ═══════════════════════════════════════════════════════════════
+   Nav
+   ═══════════════════════════════════════════════════════════════ */
+.nav {
+  position: fixed;
+  top: 0; left: 0; right: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.85rem 2rem;
+  backdrop-filter: blur(16px) saturate(180%);
+  -webkit-backdrop-filter: blur(16px) saturate(180%);
+  background: rgba(10, 14, 20, 0.72);
+  border-bottom: 1px solid var(--border);
+}
+
+.nav-brand {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  font-weight: 800;
+  font-size: 1.1rem;
+  letter-spacing: -0.03em;
+}
+
+.nav-brand svg { width: 28px; height: 28px; }
+
+.nav-links {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.nav-link {
+  padding: 0.5rem 0.9rem;
+  border-radius: 8px;
+  font-size: 0.88rem;
+  font-weight: 500;
+  color: var(--text-2);
+  transition: all 0.15s ease;
+}
+
+.nav-link:hover { color: var(--text); background: var(--bg-3); }
+
+.nav-cta {
+  padding: 0.5rem 1.1rem;
+  border-radius: 8px;
+  font-size: 0.88rem;
+  font-weight: 600;
+  background: var(--accent);
+  color: #0a0e14;
+  transition: all 0.2s ease;
+}
+
+.nav-cta:hover { transform: translateY(-1px); box-shadow: 0 4px 16px var(--accent-glow); }
+
+.nav-mobile { display: none; }
+
+@media (max-width: 768px) {
+  .nav-links { display: none; }
+  .nav-mobile { display: flex; gap: 0.5rem; }
+  .nav-cta { display: none; }
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   Hero
+   ═══════════════════════════════════════════════════════════════ */
+.hero {
+  position: relative;
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  overflow: hidden;
+  padding: 6rem 1.5rem 4rem;
+}
+
+.hero-mesh {
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(ellipse 90% 60% at 50% -10%, var(--accent-glow), transparent 60%),
+    radial-gradient(ellipse 70% 50% at 15% 70%, rgba(0, 163, 255, 0.06), transparent 60%),
+    radial-gradient(ellipse 70% 50% at 85% 30%, rgba(0, 212, 170, 0.05), transparent 60%);
+  animation: mesh-float 20s ease-in-out infinite alternate;
+}
+
+@keyframes mesh-float {
+  0%   { transform: translate(0, 0) scale(1); }
+  50%  { transform: translate(2%, -1%) scale(1.05); }
+  100% { transform: translate(-2%, 1%) scale(1); }
+}
+
+.hero-grid {
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(var(--border) 1px, transparent 1px),
+    linear-gradient(90deg, var(--border) 1px, transparent 1px);
+  background-size: 60px 60px;
+  mask-image: radial-gradient(ellipse 70% 60% at 50% 40%, black, transparent 80%);
+  -webkit-mask-image: radial-gradient(ellipse 70% 60% at 50% 40%, black, transparent 80%);
+  opacity: 0.35;
+}
+
+.hero-content {
+  position: relative;
+  z-index: 1;
+  max-width: 760px;
+  margin: 0 auto;
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.4rem 1rem;
+  border-radius: 100px;
+  font-size: 0.82rem;
+  font-weight: 500;
+  background: rgba(0, 212, 170, 0.1);
+  border: 1px solid rgba(0, 212, 170, 0.25);
+  color: var(--accent);
+  transition: all 0.2s ease;
+  margin-bottom: 2rem;
+}
+
+.badge:hover {
+  background: rgba(0, 212, 170, 0.15);
+  border-color: rgba(0, 212, 170, 0.4);
+  transform: translateY(-1px);
+}
+
+.badge-dot {
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 8px var(--accent);
+  animation: pulse 2s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.5; transform: scale(0.85); }
+}
+
+.hero-title {
+  font-size: clamp(2.5rem, 7vw, 4.5rem);
+  font-weight: 900;
+  line-height: 1.05;
+  letter-spacing: -0.05em;
+  margin-bottom: 1.5rem;
+}
+
+.gradient-text {
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+}
+
+.hero-tagline {
+  font-size: clamp(1.05rem, 2.5vw, 1.35rem);
+  font-weight: 500;
+  margin-bottom: 0.5rem;
+  line-height: 1.5;
+}
+
+.hero-sub {
+  font-size: 0.95rem;
+  color: var(--text-2);
+  margin-bottom: 2.5rem;
+  line-height: 1.6;
+}
+
+/* Terminal */
+.terminal {
+  margin: 0 auto 2.5rem;
+  max-width: 580px;
+  border-radius: 14px;
+  overflow: hidden;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.3), 0 0 0 1px var(--border);
+  text-align: left;
+}
+
+.terminal-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.7rem 1rem;
+  background: #161b22;
+  border-bottom: 1px solid #21262d;
+}
+
+.terminal-dot { width: 12px; height: 12px; border-radius: 50%; flex-shrink: 0; }
+.terminal-dot-red { background: #ff5f57; }
+.terminal-dot-yellow { background: #febc2e; }
+.terminal-dot-green { background: #28c840; }
+
+.terminal-title {
+  margin-left: auto;
+  font-size: 0.75rem;
+  color: #6b7280;
+  font-family: var(--mono);
+}
+
+.terminal-body {
+  padding: 1.25rem 1.5rem;
+  background: #0d1117;
+  font-family: var(--mono);
+  font-size: 0.82rem;
+  line-height: 1.8;
+  color: #c9d1d9;
+  overflow-x: auto;
+  white-space: pre;
+}
+
+.terminal-body .prompt { color: var(--accent); font-weight: 600; user-select: none; }
+.terminal-body .comment { color: #6b7280; }
+
+/* CTA */
+.hero-cta {
+  display: flex;
+  gap: 1rem;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.8rem 1.6rem;
+  border-radius: 10px;
+  font-weight: 600;
+  font-size: 0.95rem;
+  transition: all 0.2s ease;
+  border: 1px solid transparent;
+  cursor: pointer;
+}
+
+.btn-primary {
+  background: var(--accent);
+  color: #0a0e14;
+}
+
+.btn-primary:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 24px var(--accent-glow);
+}
+
+.btn-secondary {
+  background: transparent;
+  border-color: var(--border-2);
+  color: var(--text);
+}
+
+.btn-secondary:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  transform: translateY(-2px);
+}
+
+.btn svg { width: 18px; height: 18px; }
+.github-icon { fill: currentColor; }
+
+/* ═══════════════════════════════════════════════════════════════
+   Stats
+   ═══════════════════════════════════════════════════════════════ */
+.stats {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 1rem;
+  padding: 3rem 2rem;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  max-width: 1000px;
+  margin: 0 auto;
+}
+
+.stat { text-align: center; position: relative; }
+
+.stat:not(:last-child)::after {
+  content: '';
+  position: absolute;
+  right: -0.5rem; top: 20%;
+  height: 60%; width: 1px;
+  background: var(--border);
+}
+
+.stat-number {
+  font-size: clamp(2rem, 5vw, 3rem);
+  font-weight: 900;
+  color: var(--accent);
+  line-height: 1;
+  margin-bottom: 0.4rem;
+  letter-spacing: -0.04em;
+}
+
+.stat-x { font-size: 0.6em; opacity: 0.7; }
+.stat-slash { font-size: 0.5em; opacity: 0.6; font-weight: 600; }
+
+.stat-label {
+  font-size: 0.82rem;
+  color: var(--text-2);
+  font-weight: 500;
+  line-height: 1.4;
+}
+
+@media (max-width: 640px) {
+  .stats { grid-template-columns: repeat(2, 1fr); gap: 2rem 1rem; }
+  .stat:nth-child(2)::after { display: none; }
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   Sections
+   ═══════════════════════════════════════════════════════════════ */
+.section {
+  padding: 5rem 1.5rem;
+  max-width: 1100px;
+  margin: 0 auto;
+}
+
+.section-title {
+  font-size: clamp(1.5rem, 3.5vw, 2.2rem);
+  font-weight: 800;
+  text-align: center;
+  margin-bottom: 0.6rem;
+  letter-spacing: -0.04em;
+}
+
+.section-sub {
+  text-align: center;
+  color: var(--text-2);
+  font-size: 0.95rem;
+  margin: 0 auto 2.5rem;
+  max-width: 560px;
+  line-height: 1.6;
+}
+
+/* Flow */
+.flow {
+  display: flex;
+  align-items: stretch;
+  justify-content: center;
+  gap: 0;
+  overflow-x: auto;
+  padding: 0.5rem 0;
+}
+
+.flow-step {
+  flex: 0 0 auto;
+  width: 130px;
+  text-align: center;
+  padding: 1.25rem 0.5rem;
+}
+
+.flow-num {
+  width: 44px; height: 44px;
+  border-radius: 50%;
+  background: rgba(0, 212, 170, 0.12);
+  color: var(--accent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 800;
+  font-size: 1.1rem;
+  margin: 0 auto 0.75rem;
+  border: 2px solid rgba(0, 212, 170, 0.3);
+  transition: all 0.2s ease;
+}
+
+.flow-step:hover .flow-num {
+  background: var(--accent);
+  color: var(--bg);
+  transform: scale(1.1);
+}
+
+.flow-title { font-weight: 700; font-size: 0.85rem; margin-bottom: 0.25rem; }
+.flow-desc { font-size: 0.75rem; color: var(--text-2); line-height: 1.4; }
+
+.flow-arrow {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  padding-top: 1.75rem;
+  color: var(--text-3);
+  opacity: 0.4;
+  font-size: 1.2rem;
+}
+
+@media (max-width: 768px) {
+  .flow { flex-direction: column; align-items: center; }
+  .flow-arrow { transform: rotate(90deg); padding: 0.25rem 0; }
+}
+
+/* Feature grid */
+.feature-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1.25rem;
+}
+
+.feature {
+  padding: 1.75rem;
+  border-radius: 14px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  transition: all 0.25s ease;
+  position: relative;
+  overflow: hidden;
+}
+
+.feature::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, var(--accent), transparent);
+  opacity: 0;
+  transition: opacity 0.25s ease;
+}
+
+.feature:hover {
+  border-color: rgba(0, 212, 170, 0.4);
+  transform: translateY(-4px);
+  box-shadow: 0 12px 32px rgba(0, 212, 170, 0.06);
+}
+
+.feature:hover::before { opacity: 1; }
+
+.feature-icon {
+  width: 44px; height: 44px;
+  border-radius: 12px;
+  background: rgba(0, 212, 170, 0.12);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 1.1rem;
+}
+
+.feature-icon svg { width: 22px; height: 22px; color: var(--accent); }
+
+.feature h3 { font-size: 1.05rem; font-weight: 700; margin-bottom: 0.5rem; }
+.feature p { font-size: 0.875rem; color: var(--text-2); line-height: 1.65; }
+
+@media (max-width: 900px) { .feature-grid { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 600px) { .feature-grid { grid-template-columns: 1fr; } }
+
+/* Comparison */
+.comparison {
+  overflow-x: auto;
+  border-radius: 14px;
+  border: 1px solid var(--border);
+}
+
+.comparison table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.88rem;
+  min-width: 600px;
+}
+
+.comparison th, .comparison td {
+  padding: 0.85rem 1rem;
+  text-align: center;
+  border-bottom: 1px solid var(--border);
+}
+
+.comparison th {
+  background: var(--bg-2);
+  font-weight: 700;
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-2);
+}
+
+.comparison th:first-child, .comparison td:first-child {
+  text-align: left;
+  font-weight: 600;
+}
+
+.comparison .col-highlight {
+  background: rgba(0, 212, 170, 0.06);
+  border-left: 2px solid var(--accent);
+  border-right: 2px solid var(--accent);
+  font-weight: 600;
+}
+
+.comparison thead .col-highlight { border-top: 2px solid var(--accent); color: var(--accent); }
+.comparison tbody tr:last-child .col-highlight { border-bottom: 2px solid var(--accent); }
+
+.yes { color: var(--accent); font-weight: 700; }
+.no { color: #f87171; font-weight: 700; opacity: 0.5; }
+
+.comparison tbody tr:hover { background: rgba(0, 212, 170, 0.03); }
+
+/* Topology cards */
+.topology-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 1.25rem;
+}
+
+.topology {
+  padding: 1.5rem;
+  border-radius: 14px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  transition: all 0.25s ease;
+  display: block;
+}
+
+.topology:hover {
+  border-color: rgba(0, 212, 170, 0.4);
+  transform: translateY(-3px);
+  box-shadow: 0 8px 24px rgba(0, 212, 170, 0.06);
+}
+
+.topology-diagram {
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  background: var(--bg-3);
+  padding: 1rem;
+  border-radius: 10px;
+  margin-bottom: 1rem;
+  color: var(--accent);
+  text-align: center;
+  white-space: pre;
+  overflow-x: auto;
+  line-height: 1.6;
+}
+
+.topology h3 { font-size: 1rem; font-weight: 700; margin-bottom: 0.4rem; }
+.topology p { font-size: 0.83rem; color: var(--text-2); line-height: 1.5; }
+
+.topology-arrow {
+  display: inline-block;
+  margin-left: 0.4rem;
+  color: var(--accent);
+  opacity: 0;
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+
+.topology:hover .topology-arrow { opacity: 1; transform: translateX(3px); }
+
+@media (max-width: 600px) { .topology-grid { grid-template-columns: 1fr; } }
+
+/* CTA final */
+.cta-final {
+  text-align: center;
+  padding: 5rem 1.5rem 6rem;
+  position: relative;
+  overflow: hidden;
+}
+
+.cta-final::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(ellipse 60% 80% at 50% 50%, var(--accent-glow), transparent 70%);
+}
+
+.cta-final > * { position: relative; z-index: 1; }
+
+.cta-final h2 {
+  font-size: clamp(1.75rem, 4vw, 2.5rem);
+  font-weight: 900;
+  letter-spacing: -0.04em;
+  margin-bottom: 0.6rem;
+}
+
+.cta-final p { color: var(--text-2); font-size: 1rem; margin-bottom: 2rem; }
+
+/* Footer */
+.footer {
+  border-top: 1px solid var(--border);
+  padding: 2.5rem 2rem;
+  text-align: center;
+}
+
+.footer-links {
+  display: flex;
+  justify-content: center;
+  gap: 1.5rem;
+  margin-bottom: 1rem;
+  flex-wrap: wrap;
+}
+
+.footer-links a {
+  font-size: 0.85rem;
+  color: var(--text-2);
+  transition: color 0.15s ease;
+}
+
+.footer-links a:hover { color: var(--accent); }
+
+.footer-copy {
+  font-size: 0.8rem;
+  color: var(--text-3);
+}
+  </style>
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════════════════════════════
+     Nav
+     ═══════════════════════════════════════════════════════════════ -->
+<nav class="nav">
+  <a href="/" class="nav-brand">
+    <svg viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <path d="M6 13 L20 13 M16 9 L20 13 L16 17" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round" fill="none" style="color: var(--accent)"/>
+      <path d="M26 19 L12 19 M16 15 L12 19 L16 23" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round" fill="none" style="color: var(--accent)"/>
+    </svg>
+    hook-sync
+  </a>
+  <div class="nav-links">
+    <a href="/getting-started/overview/" class="nav-link">Docs</a>
+    <a href="/getting-started/quick-start/" class="nav-link">Quick Start</a>
+    <a href="/reference/benchmarks/" class="nav-link">Benchmarks</a>
+    <a href="https://github.com/maulanashalihin/hook-sync" class="nav-link">GitHub</a>
+    <a href="https://www.npmjs.com/package/hooksync.js" class="nav-link">npm</a>
+    <a href="/getting-started/quick-start/" class="nav-cta">Get Started</a>
+  </div>
+  <div class="nav-mobile">
+    <a href="https://github.com/maulanashalihin/hook-sync" class="nav-link">GitHub</a>
+  </div>
+</nav>
+
+<!-- ═══════════════════════════════════════════════════════════════
+     Hero
+     ═══════════════════════════════════════════════════════════════ -->
+<section class="hero">
+  <div class="hero-mesh"></div>
+  <div class="hero-grid"></div>
+  <div class="hero-content">
+    <a href="https://www.npmjs.com/package/hooksync.js" class="badge">
+      <span class="badge-dot"></span>
+      v0.1.3 on npm
+    </a>
+
+    <h1 class="hero-title">
+      SQLite replication<br/>
+      <span class="gradient-text">that just works</span>
+    </h1>
+
+    <p class="hero-tagline">Multi-server. Multi-writer. Multi-runtime. Zero data loss.</p>
+    <p class="hero-sub">No consensus. No Raft. No coordinator. Just triggers, ACK, and UUID.</p>
+
+    <div class="terminal">
+      <div class="terminal-header">
+        <span class="terminal-dot terminal-dot-red"></span>
+        <span class="terminal-dot terminal-dot-yellow"></span>
+        <span class="terminal-dot terminal-dot-green"></span>
+        <span class="terminal-title">bash — hook-sync</span>
+      </div>
+      <div class="terminal-body"><span class="comment"># Install</span>
+<span class="prompt">$</span> npm install hooksync.js
+<span class="prompt">$</span> go get hook-sync/go/trigger
+
+<span class="comment"># Run two nodes — that's it</span>
+<span class="prompt">$</span> ./hook-sync-go -id node1 -listen :9001 -peer localhost:9002
+<span class="prompt">$</span> ./hook-sync-go -id node2 -listen :9002 -peer localhost:9001</div>
+    </div>
+
+    <div class="hero-cta">
+      <a href="/getting-started/quick-start/" class="btn btn-primary">
+        Get Started →
+      </a>
+      <a href="https://github.com/maulanashalihin/hook-sync" class="btn btn-secondary">
+        <svg class="github-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 .3a12 12 0 0 0-3.8 23.4c.6.1.8-.3.8-.6v-2c-3.3.7-4-1.6-4-1.6-.6-1.4-1.3-1.8-1.3-1.8-1-.7.1-.7.1-.7 1.2.1 1.9 1.2 1.9 1.2 1 1.8 2.8 1.3 3.5 1 .1-.8.4-1.3.7-1.6-2.7-.3-5.5-1.3-5.5-6 0-1.2.5-2.3 1.3-3.1-.2-.4-.6-1.6 0-3.2 0 0 1-.3 3.4 1.2a11.5 11.5 0 0 1 6 0c2.3-1.5 3.3-1.2 3.3-1.2.7 1.6.2 2.8 0 3.2.9.8 1.3 1.9 1.3 3.1 0 4.6-2.8 5.7-5.5 6 .5.4.9 1.1.9 2.3v3.3c0 .3.1.7.8.6A12 12 0 0 0 12 .3"/></svg>
+        View on GitHub
+      </a>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════
+     Stats
+     ═══════════════════════════════════════════════════════════════ -->
+<section class="stats">
+  <div class="stat">
+    <div class="stat-number">3.8<span class="stat-x">x</span></div>
+    <div class="stat-label">faster than Postgres<br/>at batch 10K</div>
+  </div>
+  <div class="stat">
+    <div class="stat-number">36<span class="stat-slash">/36</span></div>
+    <div class="stat-label">split-brain tests<br/>pass (Go, Bun, Node)</div>
+  </div>
+  <div class="stat">
+    <div class="stat-number">3</div>
+    <div class="stat-label">runtimes sync<br/>to each other</div>
+  </div>
+  <div class="stat">
+    <div class="stat-number">0</div>
+    <div class="stat-label">data loss<br/>crash-tested</div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════
+     How It Works
+     ═══════════════════════════════════════════════════════════════ -->
+<section class="section">
+  <h2 class="section-title">How it works</h2>
+  <p class="section-sub">Three primitives: triggers, ACK, and UUID. No consensus algorithm. No Raft. No coordinator.</p>
+  <div class="flow">
+    <div class="flow-step">
+      <div class="flow-num">1</div>
+      <div class="flow-title">App Write</div>
+      <div class="flow-desc">Native SQLite speed</div>
+    </div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-step">
+      <div class="flow-num">2</div>
+      <div class="flow-title">Trigger</div>
+      <div class="flow-desc">Capture to _changes</div>
+    </div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-step">
+      <div class="flow-num">3</div>
+      <div class="flow-title">Ship</div>
+      <div class="flow-desc">HTTP POST to peers</div>
+    </div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-step">
+      <div class="flow-num">4</div>
+      <div class="flow-title">Apply</div>
+      <div class="flow-desc">INSERT OR REPLACE</div>
+    </div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-step">
+      <div class="flow-num">5</div>
+      <div class="flow-title">ACK</div>
+      <div class="flow-desc">Delete from _changes</div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════
+     Features
+     ═══════════════════════════════════════════════════════════════ -->
+<section class="section">
+  <h2 class="section-title">Why hook-sync?</h2>
+  <p class="section-sub">SQLite simplicity + multi-writer replication + cross-runtime interop, without consensus overhead.</p>
+  <div class="feature-grid">
+
+    <div class="feature">
+      <div class="feature-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12h16M8 8l-4 4 4 4M16 8l4 4-4 4"/></svg>
+      </div>
+      <h3>Multi-Writer</h3>
+      <p>All nodes accept writes independently. UUID PKs = zero conflict, no coordinator, no CRDT.</p>
+    </div>
+
+    <div class="feature">
+      <div class="feature-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="6" cy="12" r="3"/><circle cx="18" cy="12" r="3"/><circle cx="12" cy="6" r="3"/><line x1="8.5" y1="11" x2="10.5" y2="8" stroke-linecap="round"/><line x1="15.5" y1="11" x2="13.5" y2="8" stroke-linecap="round"/><line x1="9" y1="12" x2="15" y2="12" stroke-linecap="round"/></svg>
+      </div>
+      <h3>Cross-Runtime</h3>
+      <p>Go, Bun, and Node sync to each other. Same wire protocol. Mix and match freely.</p>
+    </div>
+
+    <div class="feature">
+      <div class="feature-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+      </div>
+      <h3>Zero Write Penalty</h3>
+      <p>Sync runs in background. Write speed identical with or without peers. 0% overhead.</p>
+    </div>
+
+    <div class="feature">
+      <div class="feature-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 15-6.7L21 8M21 3v5h-5M21 12a9 9 0 0 1-15 6.7L3 16M3 21v-5h5"/></svg>
+      </div>
+      <h3>Crash Recovery</h3>
+      <p>Changes survive in SQLite _changes table. Resume on restart. Zero data loss, verified.</p>
+    </div>
+
+    <div class="feature">
+      <div class="feature-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l8 4v6c0 5-3.5 9-8 10-4.5-1-8-5-8-10V6l8-4z"/></svg>
+      </div>
+      <h3>Split-Brain Safe</h3>
+      <p>Last-write-wins by timestamp. Both nodes always converge. 36/36 tests pass.</p>
+    </div>
+
+    <div class="feature">
+      <div class="feature-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="2"/><circle cx="5" cy="5" r="2"/><circle cx="19" cy="5" r="2"/><circle cx="5" cy="19" r="2"/><circle cx="19" cy="19" r="2"/><line x1="6.5" y1="6.5" x2="10.5" y2="10.5"/><line x1="17.5" y1="6.5" x2="13.5" y2="10.5"/><line x1="6.5" y1="17.5" x2="10.5" y2="13.5"/><line x1="17.5" y1="17.5" x2="13.5" y2="13.5"/></svg>
+      </div>
+      <h3>4 Topologies</h3>
+      <p>Point-to-point, full mesh, dedicated hub, multi-region. All built and benchmarked.</p>
+    </div>
+
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════
+     Comparison
+     ═══════════════════════════════════════════════════════════════ -->
+<section class="section">
+  <h2 class="section-title">How it compares</h2>
+  <p class="section-sub">hook-sync fills a gap no other project covers: SQLite simplicity + multi-writer + cross-runtime.</p>
+  <div class="comparison">
+    <table>
+      <thead>
+        <tr>
+          <th></th>
+          <th>Postgres</th>
+          <th>Litestream</th>
+          <th>rqlite</th>
+          <th class="col-highlight">hook-sync</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Multi-writer</td>
+          <td><span class="no">✗</span> Primary-only</td>
+          <td><span class="no">✗</span> Read-only</td>
+          <td><span class="no">✗</span> Leader-only</td>
+          <td class="col-highlight"><span class="yes">✓</span> All nodes write</td>
+        </tr>
+        <tr>
+          <td>Write penalty</td>
+          <td><span class="no">✗</span> WAL overhead</td>
+          <td><span class="yes">✓</span> Async</td>
+          <td><span class="no">✗</span> Raft quorum</td>
+          <td class="col-highlight"><span class="yes">✓</span> 0% overhead</td>
+        </tr>
+        <tr>
+          <td>Cross-runtime</td>
+          <td><span class="no">✗</span> C only</td>
+          <td><span class="no">✗</span> Go only</td>
+          <td><span class="no">✗</span> Go only</td>
+          <td class="col-highlight"><span class="yes">✓</span> Go · Bun · Node</td>
+        </tr>
+        <tr>
+          <td>Split-brain safe</td>
+          <td><span class="yes">✓</span> Sync repl</td>
+          <td><span class="no">✗</span></td>
+          <td><span class="yes">✓</span> Raft</td>
+          <td class="col-highlight"><span class="yes">✓</span> Timestamp LWW</td>
+        </tr>
+        <tr>
+          <td>Crash recovery</td>
+          <td><span class="yes">✓</span> WAL replay</td>
+          <td><span class="yes">✓</span> S3 restore</td>
+          <td><span class="yes">✓</span> Raft log</td>
+          <td class="col-highlight"><span class="yes">✓</span> _changes replay</td>
+        </tr>
+        <tr>
+          <td>Batch 10K QPS</td>
+          <td>8,278</td>
+          <td>N/A</td>
+          <td>N/A</td>
+          <td class="col-highlight"><strong>31,558</strong></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════
+     Topologies
+     ═══════════════════════════════════════════════════════════════ -->
+<section class="section">
+  <h2 class="section-title">Four topologies</h2>
+  <p class="section-sub">From 2 nodes to multi-region. All built, verified, and benchmarked across Go, Bun, and Node.</p>
+  <div class="topology-grid">
+
+    <a href="/topologies/point-to-point/" class="topology">
+      <div class="topology-diagram">Node A ←→ Node B</div>
+      <h3>Point-to-Point <span class="topology-arrow">→</span></h3>
+      <p>2 nodes, active-active. Simplest setup — one --peer flag each.</p>
+    </a>
+
+    <a href="/topologies/full-mesh/" class="topology">
+      <div class="topology-diagram">  A ←→ B
+  ↕ ╳ ↕
+  C ←→ D</div>
+      <h3>Full Mesh <span class="topology-arrow">→</span></h3>
+      <p>3-7 nodes, all-to-all. Per-peer watermarks, no coordinator.</p>
+    </a>
+
+    <a href="/topologies/hub/" class="topology">
+      <div class="topology-diagram">edge1 → hub → edge2
+edge3 → hub → edge4</div>
+      <h3>Dedicated Hub <span class="topology-arrow">→</span></h3>
+      <p>8+ nodes. Go-only relay with Pebble KV. Durable forwarding queue.</p>
+    </a>
+
+    <a href="/topologies/multi-region/" class="topology">
+      <div class="topology-diagram">R1: edge → hub A ←→ hub B ← edge :R2</div>
+      <h3>Multi-Region <span class="topology-arrow">→</span></h3>
+      <p>Hub-to-hub cross-region. Loop prevention via X-Node-Url header.</p>
+    </a>
+
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════
+     CTA
+     ═══════════════════════════════════════════════════════════════ -->
+<section class="cta-final">
+  <h2>Ready to sync?</h2>
+  <p>Get up and running in 5 minutes with Go, Bun, or Node.</p>
+  <a href="/getting-started/quick-start/" class="btn btn-primary">
+    Quick Start →
+  </a>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════
+     Footer
+     ═══════════════════════════════════════════════════════════════ -->
+<footer class="footer">
+  <div class="footer-links">
+    <a href="/getting-started/overview/">Docs</a>
+    <a href="/getting-started/quick-start/">Quick Start</a>
+    <a href="/reference/protocol/">Wire Protocol</a>
+    <a href="/reference/benchmarks/">Benchmarks</a>
+    <a href="https://github.com/maulanashalihin/hook-sync">GitHub</a>
+    <a href="https://www.npmjs.com/package/hooksync.js">npm</a>
+  </div>
+  <div class="footer-copy">MIT License · hook-sync</div>
+</footer>
+
+</body>
+</html>
