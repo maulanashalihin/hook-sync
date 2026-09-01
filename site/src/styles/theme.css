@@ -319,6 +319,11 @@ main h1 {
   letter-spacing: -0.04em;
 }
 
+/* Steps: number badge text is white on light bg */
+.sl-steps li::before {
+  color: var(--sl-color-text);
+}
+
 /* ── Page Footer (prev/next) ──────────────────────────────────── */
 .pagination-links {
   border-color: var(--sl-color-border);
