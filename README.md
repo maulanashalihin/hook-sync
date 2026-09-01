@@ -146,8 +146,8 @@ hook-sync/
 │   │   ├── mesh/main.go      #     full mesh (multi-peer, per-peer watermark)
 │   │   ├── hub/main.go       #     dedicated hub (Pebble KV, pure relay — no client requests)
 │   │   └── multitable/main.go#     multi-table (items + categories)
-│   ├── hookmem/              #   experimental: preupdate_hook + in-memory (no persistence)
-│   ├── hookpebble/           #   experimental: preupdate_hook + Pebble (same-txn safe)
+│   ├── hookmem/              #   experimental: preupdate_hook + in-memory (no persistence, benchmark baseline)
+│   ├── hookpebble/           #   experimental: preupdate_hook + Pebble (same-txn safe, prototype for hook/ library)
 │   └── bench/                #   direct SQLite benchmarks (trigger overhead, hook vs trigger)
 ├── bun/                      # Bun implementation (Bun.serve + bun:sqlite)
 │   ├── server.ts             #   single-table, point-to-point
