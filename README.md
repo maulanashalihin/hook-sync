@@ -2,6 +2,8 @@
 
 > SQLite replication that just works. Multi-server, multi-writer, multi-runtime. Zero data loss.
 
+**Website**: [hook-sync.pages.dev](https://hook-sync.pages.dev) · **npm**: [hooksync.js](https://www.npmjs.com/package/hooksync.js) · **GitHub**: [maulanashalihin/hook-sync](https://github.com/maulanashalihin/hook-sync)
+
 SQLite is the fastest SQL database in the world — zero config, single file, serverless. But it can't replicate. Until now.
 
 hook-sync adds replication to SQLite via triggers + HTTP sync. No consensus algorithm. No Raft. No coordinator. Just triggers, ACK, and UUID. The result: **3.8x faster than Postgres at batch 10K**, with multi-writer active-active, crash recovery, and split-brain safety — all in a single binary.
@@ -605,6 +607,13 @@ Reference implementations: `go/cmd/server/main.go` (thin wrapper over `trigger/`
 - **Multi-table setup** — Go libraries (`trigger/`, `hook/`) and JS library (`hooksync.js`) are table-agnostic: pass table names to `attach()`, triggers are auto-generated via schema introspection. Bun and Node wrappers still hardcode `items` table (see `go/cmd/multitable/`, `bun/server-multitable.ts`, `node/server-multitable.js` for 2-table example with manual trigger setup)
 - **Localhost benchmark variance** — HTTP throughput varies 3-8x on localhost; use real network for reliable comparison
 - **Last-write-wins, not CRDT** — split-brain conflicts resolve by timestamp. Older update is silently dropped. Fine for append-heavy workloads; for collaborative editing of shared rows, use cr-sqlite
+
+
+## About
+
+[hook-sync](https://github.com/maulanashalihin/hook-sync) is an open-source SQLite replication engine built by [Maulana Shalihin](https://github.com/maulanashalihin). It fills a gap no other project covers: SQLite simplicity + multi-writer replication + cross-runtime interop (Go, Bun, Node), without consensus overhead.
+
+Full documentation, benchmarks, and topology guides at [hook-sync.pages.dev](https://hook-sync.pages.dev).
 
 ## License
 
