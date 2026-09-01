@@ -2,55 +2,264 @@
 title: hook-sync
 description: SQLite replication that just works. Multi-server, multi-writer, multi-runtime. Zero data loss.
 template: splash
+tableOfContents: false
 ---
 
-import { Card, CardGrid } from '@astrojs/starlight/components';
+<div class="hs-landing">
 
-<div style="display: flex; flex-direction: column; gap: 2rem; margin: 2rem 0;">
+  <section class="hs-hero">
+    <div class="hs-hero-mesh"></div>
+    <div class="hs-hero-grid"></div>
+    <div class="hs-hero-content">
+      <a class="hs-badge" href="https://www.npmjs.com/package/hooksync.js">
+        <span class="hs-badge-dot"></span>
+        v0.1.3 on npm
+      </a>
 
-<div style="text-align: center; padding: 3rem 1rem;">
+      <h1 class="hs-hero-title">
+        SQLite replication<br/>
+        <span class="hs-gradient-text">that just works</span>
+      </h1>
 
-# hook-sync
+      <p class="hs-hero-tagline">Multi-server. Multi-writer. Multi-runtime. Zero data loss.</p>
+      <p class="hs-hero-sub">No consensus. No Raft. No coordinator. Just triggers, ACK, and UUID.</p>
 
-**SQLite replication that just works.**
+      <div class="hs-terminal">
+        <div class="hs-terminal-header">
+          <span class="hs-terminal-dot hs-terminal-dot-red"></span>
+          <span class="hs-terminal-dot hs-terminal-dot-yellow"></span>
+          <span class="hs-terminal-dot hs-terminal-dot-green"></span>
+          <span class="hs-terminal-title">bash — hook-sync</span>
+        </div>
+        <div class="hs-terminal-body" set:html={'<code><span class="hs-comment"># Install</span>\n<span class="hs-prompt">$</span> npm install hooksync.js\n<span class="hs-prompt">$</span> go get hook-sync/go/trigger\n\n<span class="hs-comment"># Run two nodes — that\'s it</span>\n<span class="hs-prompt">$</span> ./hook-sync-go -id node1 -listen :9001 -peer localhost:9002\n<span class="hs-prompt">$</span> ./hook-sync-go -id node2 -listen :9002 -peer localhost:9001</code>'} />
+      </div>
 
-Multi-server. Multi-writer. Multi-runtime. Zero data loss.
+      <div class="hs-hero-cta">
+        <a class="hs-btn hs-btn-primary" href="/getting-started/overview/">
+          Get Started →
+        </a>
+        <a class="hs-btn hs-btn-secondary" href="https://github.com/maulanashalihin/hook-sync">
+          <svg class="hs-github-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 .3a12 12 0 0 0-3.8 23.4c.6.1.8-.3.8-.6v-2c-3.3.7-4-1.6-4-1.6-.6-1.4-1.3-1.8-1.3-1.8-1-.7.1-.7.1-.7 1.2.1 1.9 1.2 1.9 1.2 1 1.8 2.8 1.3 3.5 1 .1-.8.4-1.3.7-1.6-2.7-.3-5.5-1.3-5.5-6 0-1.2.5-2.3 1.3-3.1-.2-.4-.6-1.6 0-3.2 0 0 1-.3 3.4 1.2a11.5 11.5 0 0 1 6 0c2.3-1.5 3.3-1.2 3.3-1.2.7 1.6.2 2.8 0 3.2.9.8 1.3 1.9 1.3 3.1 0 4.6-2.8 5.7-5.5 6 .5.4.9 1.1.9 2.3v3.3c0 .3.1.7.8.6A12 12 0 0 0 12 .3"/></svg>
+          View on GitHub
+        </a>
+      </div>
+    </div>
+  </section>
 
-No consensus. No Raft. No coordinator. Just triggers, ACK, and UUID.
+  <section class="hs-stats">
+    <div class="hs-stat">
+      <div class="hs-stat-number">3.8<span class="hs-stat-x">x</span></div>
+      <div class="hs-stat-label">faster than Postgres<br/>at batch 10K</div>
+    </div>
+    <div class="hs-stat">
+      <div class="hs-stat-number">36<span class="hs-stat-slash">/36</span></div>
+      <div class="hs-stat-label">split-brain tests<br/>pass (Go, Bun, Node)</div>
+    </div>
+    <div class="hs-stat">
+      <div class="hs-stat-number">3</div>
+      <div class="hs-stat-label">runtimes sync<br/>to each other</div>
+    </div>
+    <div class="hs-stat">
+      <div class="hs-stat-number">0</div>
+      <div class="hs-stat-label">data loss<br/>crash-tested</div>
+    </div>
+  </section>
 
-**3.8x faster than Postgres at batch 10K.**
+  <section class="hs-section">
+    <h2 class="hs-section-title">How it works</h2>
+    <p class="hs-section-sub">Three primitives: triggers, ACK, and UUID. No consensus algorithm. No Raft. No coordinator.</p>
+    <div class="hs-flow">
+      <div class="hs-flow-step">
+        <div class="hs-flow-num">1</div>
+        <div class="hs-flow-title">App Write</div>
+        <div class="hs-flow-desc">Native SQLite speed</div>
+      </div>
+      <div class="hs-flow-arrow">→</div>
+      <div class="hs-flow-step">
+        <div class="hs-flow-num">2</div>
+        <div class="hs-flow-title">Trigger</div>
+        <div class="hs-flow-desc">Capture to _changes</div>
+      </div>
+      <div class="hs-flow-arrow">→</div>
+      <div class="hs-flow-step">
+        <div class="hs-flow-num">3</div>
+        <div class="hs-flow-title">Ship</div>
+        <div class="hs-flow-desc">HTTP POST to peers</div>
+      </div>
+      <div class="hs-flow-arrow">→</div>
+      <div class="hs-flow-step">
+        <div class="hs-flow-num">4</div>
+        <div class="hs-flow-title">Apply</div>
+        <div class="hs-flow-desc">INSERT OR REPLACE</div>
+      </div>
+      <div class="hs-flow-arrow">→</div>
+      <div class="hs-flow-step">
+        <div class="hs-flow-num">5</div>
+        <div class="hs-flow-title">ACK</div>
+        <div class="hs-flow-desc">Delete from _changes</div>
+      </div>
+    </div>
+  </section>
 
-```bash
-# Go
-go get hook-sync/go/trigger
+  <section class="hs-section">
+    <h2 class="hs-section-title">Why hook-sync?</h2>
+    <p class="hs-section-sub">SQLite simplicity + multi-writer replication + cross-runtime interop, without consensus overhead.</p>
+    <div class="hs-feature-grid">
 
-# JS (Bun + Node)
-npm install hooksync.js
-```
+      <div class="hs-feature">
+        <div class="hs-feature-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12h16M8 8l-4 4 4 4M16 8l4 4-4 4"/></svg>
+        </div>
+        <h3>Multi-Writer</h3>
+        <p>All nodes accept writes independently. UUID PKs = zero conflict, no coordinator, no CRDT.</p>
+      </div>
 
-[Get Started →](../getting-started/overview/)
+      <div class="hs-feature">
+        <div class="hs-feature-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="6" cy="12" r="3"/><circle cx="18" cy="12" r="3"/><circle cx="12" cy="6" r="3"/><line x1="8.5" y1="11" x2="10.5" y2="8" stroke-linecap="round"/><line x1="15.5" y1="11" x2="13.5" y2="8" stroke-linecap="round"/><line x1="9" y1="12" x2="15" y2="12" stroke-linecap="round"/></svg>
+        </div>
+        <h3>Cross-Runtime</h3>
+        <p>Go, Bun, and Node sync to each other. Same wire protocol. Mix and match freely.</p>
+      </div>
 
-</div>
+      <div class="hs-feature">
+        <div class="hs-feature-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+        </div>
+        <h3>Zero Write Penalty</h3>
+        <p>Sync runs in background. Write speed identical with or without peers. 0% overhead.</p>
+      </div>
 
-<CardGrid stagger>
- <Card title="Multi-Writer" icon="seti:rust">
-  All nodes accept writes independently. UUID PKs = zero conflict, no coordinator.
- </Card>
- <Card title="Cross-Runtime" icon="seti:javascript">
-  Go, Bun, and Node sync to each other. Same wire protocol. Mix and match.
- </Card>
- <Card title="Zero Write Penalty" icon="seti:docker">
-  Sync runs in background. Write speed identical with or without peers.
- </Card>
- <Card title="Crash Recovery" icon="seti:shell">
-  Changes survive in SQLite `_changes` table. Resume on restart. Zero data loss.
- </Card>
- <Card title="Split-Brain Safe" icon="seti:terraform">
-  Last-write-wins by timestamp. Both nodes always converge. 36/36 tests pass.
- </Card>
- <Card title="4 Topologies" icon="seti:graphql">
-  Point-to-point, full mesh, dedicated hub, multi-region. All built and verified.
- </Card>
-</CardGrid>
+      <div class="hs-feature">
+        <div class="hs-feature-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 15-6.7L21 8M21 3v5h-5M21 12a9 9 0 0 1-15 6.7L3 16M3 21v-5h5"/></svg>
+        </div>
+        <h3>Crash Recovery</h3>
+        <p>Changes survive in SQLite _changes table. Resume on restart. Zero data loss, verified.</p>
+      </div>
+
+      <div class="hs-feature">
+        <div class="hs-feature-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l8 4v6c0 5-3.5 9-8 10-4.5-1-8-5-8-10V6l8-4z"/></svg>
+        </div>
+        <h3>Split-Brain Safe</h3>
+        <p>Last-write-wins by timestamp. Both nodes always converge. 36/36 tests pass.</p>
+      </div>
+
+      <div class="hs-feature">
+        <div class="hs-feature-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="2"/><circle cx="5" cy="5" r="2"/><circle cx="19" cy="5" r="2"/><circle cx="5" cy="19" r="2"/><circle cx="19" cy="19" r="2"/><line x1="6.5" y1="6.5" x2="10.5" y2="10.5"/><line x1="17.5" y1="6.5" x2="13.5" y2="10.5"/><line x1="6.5" y1="17.5" x2="10.5" y2="13.5"/><line x1="17.5" y1="17.5" x2="13.5" y2="13.5"/></svg>
+        </div>
+        <h3>4 Topologies</h3>
+        <p>Point-to-point, full mesh, dedicated hub, multi-region. All built and benchmarked.</p>
+      </div>
+
+    </div>
+  </section>
+
+  <section class="hs-section">
+    <h2 class="hs-section-title">How it compares</h2>
+    <p class="hs-section-sub">hook-sync fills a gap no other project covers: SQLite simplicity + multi-writer + cross-runtime.</p>
+    <div class="hs-comparison">
+      <table>
+        <thead>
+          <tr>
+            <th></th>
+            <th>Postgres</th>
+            <th>Litestream</th>
+            <th>rqlite</th>
+            <th class="hs-col-highlight">hook-sync</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Multi-writer</td>
+            <td><span class="hs-no">✗</span> Primary-only</td>
+            <td><span class="hs-no">✗</span> Read-only</td>
+            <td><span class="hs-no">✗</span> Leader-only</td>
+            <td class="hs-col-highlight"><span class="hs-yes">✓</span> All nodes write</td>
+          </tr>
+          <tr>
+            <td>Write penalty</td>
+            <td><span class="hs-no">✗</span> WAL overhead</td>
+            <td><span class="hs-yes">✓</span> Async</td>
+            <td><span class="hs-no">✗</span> Raft quorum</td>
+            <td class="hs-col-highlight"><span class="hs-yes">✓</span> 0% overhead</td>
+          </tr>
+          <tr>
+            <td>Cross-runtime</td>
+            <td><span class="hs-no">✗</span> C only</td>
+            <td><span class="hs-no">✗</span> Go only</td>
+            <td><span class="hs-no">✗</span> Go only</td>
+            <td class="hs-col-highlight"><span class="hs-yes">✓</span> Go · Bun · Node</td>
+          </tr>
+          <tr>
+            <td>Split-brain safe</td>
+            <td><span class="hs-yes">✓</span> Sync repl</td>
+            <td><span class="hs-no">✗</span></td>
+            <td><span class="hs-yes">✓</span> Raft</td>
+            <td class="hs-col-highlight"><span class="hs-yes">✓</span> Timestamp LWW</td>
+          </tr>
+          <tr>
+            <td>Crash recovery</td>
+            <td><span class="hs-yes">✓</span> WAL replay</td>
+            <td><span class="hs-yes">✓</span> S3 restore</td>
+            <td><span class="hs-yes">✓</span> Raft log</td>
+            <td class="hs-col-highlight"><span class="hs-yes">✓</span> _changes replay</td>
+          </tr>
+          <tr>
+            <td>Batch 10K QPS</td>
+            <td>8,278</td>
+            <td>N/A</td>
+            <td>N/A</td>
+            <td class="hs-col-highlight"><strong>31,558</strong></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="hs-section">
+    <h2 class="hs-section-title">Four topologies</h2>
+    <p class="hs-section-sub">From 2 nodes to multi-region. All built, verified, and benchmarked across Go, Bun, and Node.</p>
+    <div class="hs-topology-grid">
+
+      <a class="hs-topology" href="/topologies/point-to-point/">
+        <div class="hs-topology-diagram">Node A ←→ Node B</div>
+        <h3>Point-to-Point <span class="hs-topology-arrow">→</span></h3>
+        <p>2 nodes, active-active. Simplest setup — one --peer flag each.</p>
+      </a>
+
+      <a class="hs-topology" href="/topologies/full-mesh/">
+        <div class="hs-topology-diagram">  A ←→ B
+  ↕ ╳ ↕
+  C ←→ D</div>
+        <h3>Full Mesh <span class="hs-topology-arrow">→</span></h3>
+        <p>3-7 nodes, all-to-all. Per-peer watermarks, no coordinator.</p>
+      </a>
+
+      <a class="hs-topology" href="/topologies/hub/">
+        <div class="hs-topology-diagram">edge1 → hub → edge2
+edge3 → hub → edge4</div>
+        <h3>Dedicated Hub <span class="hs-topology-arrow">→</span></h3>
+        <p>8+ nodes. Go-only relay with Pebble KV. Durable forwarding queue.</p>
+      </a>
+
+      <a class="hs-topology" href="/topologies/multi-region/">
+        <div class="hs-topology-diagram">R1: edge → hub A ←→ hub B ← edge :R2</div>
+        <h3>Multi-Region <span class="hs-topology-arrow">→</span></h3>
+        <p>Hub-to-hub cross-region. Loop prevention via X-Node-Url header.</p>
+      </a>
+
+    </div>
+  </section>
+
+  <section class="hs-cta-final">
+    <h2>Ready to sync?</h2>
+    <p>Get up and running in 5 minutes with Go, Bun, or Node.</p>
+    <a class="hs-btn hs-btn-primary" href="/getting-started/quick-start/">
+      Quick Start →
+    </a>
+  </section>
 
 </div>

@@ -9,6 +9,13 @@ export default defineConfig({
 		starlight({
 			title: 'hook-sync',
 			description: 'SQLite replication that just works. Multi-server, multi-writer, multi-runtime. Zero data loss.',
+			logo: {
+				src: './src/assets/logo.svg',
+				alt: 'hook-sync',
+			},
+			customCss: [
+				'./src/styles/theme.css',
+			],
 			social: [
 				{ icon: 'github', label: 'GitHub', href: 'https://github.com/maulanashalihin/hook-sync' },
 				{ icon: 'npm', label: 'npm', href: 'https://www.npmjs.com/package/hooksync.js' },
