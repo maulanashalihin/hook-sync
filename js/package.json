@@ -1,6 +1,6 @@
 {
   "name": "hooksync.js",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "SQLite replication library — trigger-based change capture, ACK-based sync, last-write-wins conflict resolution. Works with bun:sqlite and better-sqlite3.",
   "type": "module",
   "main": "./src/index.ts",

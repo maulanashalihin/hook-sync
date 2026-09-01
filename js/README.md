@@ -111,7 +111,79 @@ Response:
 { "applied": 2, "ack": 42 }
 ```
 
-Caller wires the HTTP server (`Bun.serve`, `http.createServer`, Express, HyperExpress, etc.) and routes `/sync` to `mgr.applyChanges()`.
+### HTTP Server Setup (Required)
+
+The library does **not** include an HTTP server. You must wire one yourself and route `POST /sync` to `mgr.applyChanges()`. This is intentional — you may already have an HTTP server (Bun.serve, Express, Hono, HyperExpress, `http.createServer`, etc.).
+
+**Bun:**
+
+```ts
+Bun.serve({
+  port: 9001,
+  fetch(req) {
+    const url = new URL(req.url);
+
+    // /sync — receive changes from peers
+    if (req.method === "POST" && url.pathname === "/sync") {
+      return req.json().then((body) => {
+        const applied = mgr.applyChanges(body.changes);
+        return Response.json({ applied, ack: body.batch_id });
+      });
+    }
+
+    // /health
+    if (req.method === "GET" && url.pathname === "/health") {
+      return Response.json(mgr.health());
+    }
+
+    // ... your CRUD endpoints here
+    return new Response("not found", { status: 404 });
+  },
+});
+```
+
+**Node (http.createServer):**
+
+```js
+const http = require("http");
+
+const server = http.createServer(async (req, res) => {
+  if (req.method === "POST" && req.url === "/sync") {
+    const body = JSON.parse(await readBody(req));
+    const applied = mgr.applyChanges(body.changes);
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ applied, ack: body.batch_id }));
+    return;
+  }
+
+  if (req.method === "GET" && req.url === "/health") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(mgr.health()));
+    return;
+  }
+
+  // ... your CRUD endpoints here
+  res.writeHead(404);
+  res.end("not found");
+});
+
+server.listen(9001);
+```
+
+**Node (Express / Hono / HyperExpress):**
+
+```js
+app.post("/sync", async (req, res) => {
+  const applied = mgr.applyChanges(req.body.changes);
+  res.json({ applied, ack: req.body.batch_id });
+});
+
+app.get("/health", (req, res) => {
+  res.json(mgr.health());
+});
+```
+
+The pattern is always the same: parse the JSON body, call `mgr.applyChanges(body.changes)`, return `{ applied, ack: body.batch_id }`.
 
 ## Multi-Peer (Full Mesh)
 

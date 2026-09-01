@@ -221,6 +221,13 @@ mgr, _ := hook.Open("app.db", hooksync.Config{
 defer mgr.Stop()
 ```
 
+Wire the HTTP server — Go's `trigger.Manager` implements `http.Handler`, so `/sync` is one line:
+
+```go
+http.Handle("/sync", mgr)  // mgr.ServeHTTP handles parse + apply + ACK
+http.ListenAndServe(":9001", nil)
+```
+
 `ApplyChange()` is table-agnostic — column names come from `Change.Row` map, no hardcoded columns. `validTable()` validates table names (alphanumeric + underscore only) as defense-in-depth against SQL injection via table names (SQLite doesn't support parameterized table names).
 
 ## JS Library
@@ -254,9 +261,14 @@ const mgr = attach(db, {
   batchMs: 50,
 }, ["items"]);
 
-// Wire HTTP server (Bun.serve, http.createServer, Express, etc.)
-// POST /sync → mgr.applyChanges(body.changes)
-// GET /health → mgr.health()
+// Wire HTTP server — the library does NOT include one.
+// You must route POST /sync to mgr.applyChanges():
+//
+//   Bun.serve, http.createServer, Express, Hono, HyperExpress, etc.
+//   POST /sync → mgr.applyChanges(body.changes) → { applied, ack: body.batch_id }
+//   GET /health → mgr.health()
+//
+// See js/README.md for full HTTP server setup examples (Bun + Node).
 
 mgr.stop(); // shutdown
 ```
