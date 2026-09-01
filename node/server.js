@@ -1,18 +1,18 @@
-// hook-sync Node.js implementation
-// Uses better-sqlite3 + hyper-express (uWebSockets backend)
-// Same wire protocol as Go and Bun implementations
+// hook-sync Node.js wrapper — thin shell over js/ library
+// hyper-express + better-sqlite3 + crypto.randomUUID()
 //
 // Usage: node server.js --id node1 --db node1.db --listen :9001 --peer http://localhost:9002 --batch-ms 50
 
 const HyperExpress = require("hyper-express");
 const Database = require("better-sqlite3");
 const crypto = require("crypto");
+const { attach } = require("../js/src/index.ts");
 
 // --- Parse args ---
 const args = process.argv.slice(2);
 const getArg = (name, def) => {
 	const i = args.indexOf(`--${name}`);
-	return i >= 0 ? args[i + 1] : def;
+	return i >= 0 && i + 1 < args.length ? args[i + 1] : def;
 };
 
 const ID = getArg("id", "");
@@ -32,8 +32,9 @@ db.pragma("journal_mode = WAL");
 db.pragma("synchronous = NORMAL");
 db.pragma("busy_timeout = 5000");
 
+// --- Data table (caller defines schema) ---
 db.exec(`
-	CREATE TABLE IF NOT EXISTS items (
+	CREATE TABLE IF NOT EXISTS items(
 		id TEXT PRIMARY KEY,
 		name TEXT,
 		value INTEGER,
@@ -41,175 +42,18 @@ db.exec(`
 		updated_at INTEGER,
 		node_id TEXT
 	);
-
-	CREATE TABLE IF NOT EXISTS _meta (
-		key TEXT PRIMARY KEY,
-		value INTEGER
-	);
-	INSERT OR IGNORE INTO _meta(key, value) VALUES('syncing', 0);
-
-	CREATE TABLE IF NOT EXISTS _changes (
-		change_id INTEGER PRIMARY KEY AUTOINCREMENT,
-		op TEXT,
-		row_id TEXT,
-		row_data TEXT
-	);
-
-	CREATE TABLE IF NOT EXISTS _dead_letter (
-		dead_id INTEGER PRIMARY KEY AUTOINCREMENT,
-		op TEXT,
-		row_id TEXT,
-		row_data TEXT,
-		failed_at INTEGER,
-		retry_count INTEGER DEFAULT 0
-	);
 `);
 
-// Triggers — only fire when not syncing
-db.exec(`
-	CREATE TRIGGER IF NOT EXISTS items_ai AFTER INSERT ON items
-	WHEN (SELECT value FROM _meta WHERE key = 'syncing') = 0
-	BEGIN
-		INSERT INTO _changes(op, row_id, row_data) VALUES('INSERT', NEW.id,
-			json_object('id', NEW.id, 'name', NEW.name, 'value', NEW.value,
-				'created_at', NEW.created_at, 'updated_at', NEW.updated_at, 'node_id', NEW.node_id));
-	END;
+// --- Attach sync library ---
+const peers = PEER_URL ? [PEER_URL] : [];
+const mgr = attach(db, { id: ID, peers, batchMs: BATCH_MS }, ["items"]);
 
-	CREATE TRIGGER IF NOT EXISTS items_au AFTER UPDATE ON items
-	WHEN (SELECT value FROM _meta WHERE key = 'syncing') = 0
-	BEGIN
-		INSERT INTO _changes(op, row_id, row_data) VALUES('UPDATE', NEW.id,
-			json_object('id', NEW.id, 'name', NEW.name, 'value', NEW.value,
-				'created_at', NEW.created_at, 'updated_at', NEW.updated_at, 'node_id', NEW.node_id));
-	END;
-
-	CREATE TRIGGER IF NOT EXISTS items_ad AFTER DELETE ON items
-	WHEN (SELECT value FROM _meta WHERE key = 'syncing') = 0
-	BEGIN
-		INSERT INTO _changes(op, row_id, row_data) VALUES('DELETE', OLD.id,
-			json_object('id', OLD.id, 'name', OLD.name, 'value', OLD.value,
-				'created_at', OLD.created_at, 'updated_at', OLD.updated_at, 'node_id', OLD.node_id));
-	END;
-`);
-
-// --- Precompile statements ---
+// --- Precompile CRUD statements ---
 const stmtInsert = db.prepare("INSERT INTO items(id, name, value, created_at, updated_at, node_id) VALUES(?, ?, ?, ?, ?, ?)");
 const stmtUpdate = db.prepare("UPDATE items SET name = ?, value = ?, updated_at = ? WHERE id = ?");
 const stmtDelete = db.prepare("DELETE FROM items WHERE id = ?");
-const stmtReplace = db.prepare("INSERT OR REPLACE INTO items(id, name, value, created_at, updated_at, node_id) VALUES(?, ?, ?, ?, ?, ?)");
-const stmtGetUpdatedAt = db.prepare("SELECT updated_at FROM items WHERE id = ?");
 const stmtList = db.prepare("SELECT id, name, value, created_at, updated_at, node_id FROM items ORDER BY created_at DESC LIMIT 100");
 const stmtGet = db.prepare("SELECT id, name, value, created_at, updated_at, node_id FROM items WHERE id = ?");
-const stmtCount = db.prepare("SELECT COUNT(*) as count FROM items");
-const stmtChanges = db.prepare("SELECT change_id, op, row_id, row_data FROM _changes ORDER BY change_id LIMIT 10000");
-const stmtDeleteChanges = db.prepare("DELETE FROM _changes WHERE change_id <= ?");
-const stmtSyncOn = db.prepare("UPDATE _meta SET value = 1 WHERE key = 'syncing'");
-const stmtSyncOff = db.prepare("UPDATE _meta SET value = 0 WHERE key = 'syncing'");
-const stmtDeadLetter = db.prepare("INSERT INTO _dead_letter(op, row_id, row_data, failed_at, retry_count) VALUES(?, ?, ?, ?, ?)");
-const stmtPendingChanges = db.prepare("SELECT COUNT(*) as count FROM _changes");
-const stmtDeadLetterCount = db.prepare("SELECT COUNT(*) as count FROM _dead_letter");
-
-// --- Batch ship (ACK-based: returns "ack", "mismatch", or "conn_error") ---
-async function shipBatch(batchId, changes) {
-	if (!PEER_URL || changes.length === 0) return "ack";
-	try {
-		const resp = await fetch(`${PEER_URL}/sync`, {
-			method: "POST",
-			headers: { "Content-Type": "application/json", "X-Node-Id": ID },
-			body: JSON.stringify({ batch_id: batchId, changes }),
-		});
-		if (!resp.ok) return "mismatch";
-		const body = await resp.json();
-		return body.ack === batchId ? "ack" : "mismatch";
-	} catch {
-		return "conn_error";
-	}
-}
-
-const BACKOFF_MS = [50, 100, 200, 400, 800];
-let shipping = false;
-
-// Poll _changes every BATCH_MS — delete only after ACK confirms receipt
-setInterval(() => {
-if (!PEER_URL) return; // no peer — keep changes in _changes for when peer is configured
-	if (shipping) return;
-	const rows = stmtChanges.all();
-	if (rows.length === 0) return;
-
-	const batchId = rows[rows.length - 1].change_id;
-	const changes = rows.map((r) => ({
-		op: r.op,
-		table: "items",
-		row: r.row_data ? JSON.parse(r.row_data) : null,
-		old_id: r.op === "DELETE" ? r.row_id : null,
-	}));
-
-	shipping = true;
-	(async () => {
-		try {
-			let connError = false;
-			for (let attempt = 0; attempt < BACKOFF_MS.length; attempt++) {
-				const status = await shipBatch(batchId, changes);
-				if (status === "ack") {
-					stmtDeleteChanges.run(batchId);
-					return;
-				}
-				if (status === "conn_error") {
-					connError = true;
-				} else {
-					connError = false;
-				}
-				if (attempt < BACKOFF_MS.length - 1) {
-					await new Promise((resolve) => setTimeout(resolve, BACKOFF_MS[attempt]));
-				}
-			}
-			if (connError) {
-				// Peer unreachable — keep changes in _changes, try again next tick
-				console.error(`[${ID}] peer unreachable, keeping ${rows.length} changes for next tick`);
-				return;
-			}
-			// ACK mismatch (protocol error) → dead-letter the batch, then clear
-			const now = Date.now();
-			for (const r of rows) {
-				stmtDeadLetter.run(r.op, r.row_id, r.row_data, now, BACKOFF_MS.length);
-			}
-			stmtDeleteChanges.run(batchId);
-		} finally {
-			shipping = false;
-		}
-	})();
-}, BATCH_MS);
-
-// --- Apply received changes (transaction prevents local writes from interleaving) ---
-const applyChanges = db.transaction((changes) => {
-	stmtSyncOn.run();
-	let applied = 0;
-	try {
-		for (const c of changes) {
-			if (c.op === "INSERT" || c.op === "UPDATE") {
-				if (!c.row) continue;
-				const r = c.row;
-				// Last-write-wins: skip if existing row is newer than incoming
-				const existing = stmtGetUpdatedAt.get(r.id);
-				if (existing && existing.updated_at > r.updated_at) continue;
-				stmtReplace.run(r.id, r.name, r.value, r.created_at, r.updated_at, r.node_id);
-				applied++;
-			} else if (c.op === "DELETE") {
-				if (!c.old_id) continue;
-				// Last-write-wins: skip delete if row was updated after deletion
-				if (c.row) {
-					const existing = stmtGetUpdatedAt.get(c.old_id);
-					if (existing && existing.updated_at > c.row.updated_at) continue;
-				}
-				stmtDelete.run(c.old_id);
-				applied++;
-			}
-		}
-	} finally {
-		stmtSyncOff.run();
-	}
-	return applied;
-});
 
 // --- HTTP server (hyper-express / uWebSockets) ---
 const app = new HyperExpress.Server({ max_body_length: 100 * 1024 * 1024 });
@@ -218,7 +62,7 @@ const app = new HyperExpress.Server({ max_body_length: 100 * 1024 * 1024 });
 app.post("/sync", async (req, res) => {
 	try {
 		const body = await req.json();
-		const applied = applyChanges(body.changes);
+		const applied = mgr.applyChanges(body.changes);
 		res.json({ applied, ack: body.batch_id });
 	} catch (e) {
 		res.status(400).json({ error: e.message });
@@ -291,10 +135,7 @@ app.delete("/api/items/:id", (req, res) => {
 
 // GET /health
 app.get("/health", (req, res) => {
-	const { count } = stmtCount.get();
-	const { count: pendingChanges } = stmtPendingChanges.get();
-	const { count: deadLetter } = stmtDeadLetterCount.get();
-	res.json({ ok: true, node_id: ID, item_count: count, pending_changes: pendingChanges, dead_letter: deadLetter });
+	res.json(mgr.health());
 });
 
 app.listen(parseInt(LISTEN.replace(":", "")))

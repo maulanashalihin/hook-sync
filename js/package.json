@@ -1,0 +1,24 @@
+{
+  "name": "hook-sync",
+  "version": "0.1.0",
+  "description": "SQLite replication library — trigger-based change capture, ACK-based sync, last-write-wins conflict resolution. Works with bun:sqlite and better-sqlite3.",
+  "type": "module",
+  "main": "./src/index.ts",
+  "module": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "import": "./src/index.ts",
+      "require": "./src/index.ts"
+    }
+  },
+  "files": ["src"],
+  "license": "MIT",
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0"
+  }
+}
