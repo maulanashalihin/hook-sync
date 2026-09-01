@@ -82,15 +82,16 @@ code, pre, kbd, samp {
   background: color-mix(in srgb, var(--sl-color-bg) 75%, transparent);
 }
 
-/* Brand: match landing page — bold, tight letter-spacing */
-.site-brand {
+/* Brand: match landing page — bold, tight letter-spacing, text not accent */
+.site-title {
   font-weight: 800;
   letter-spacing: -0.03em;
+  color: var(--sl-color-text);
 }
 
-.site-brand img {
-  width: 28px;
+.site-title img {
   height: 28px;
+  width: auto;
 }
 
 /* ── Sidebar ──────────────────────────────────────────────────── */
@@ -216,15 +217,37 @@ a {
 }
 
 /* ── Cards ────────────────────────────────────────────────────── */
+/* Override Starlight default: black bg + white text → theme-aware */
 .card {
+  background-color: var(--sl-color-bg-secondary);
+  border: 1px solid var(--sl-color-border);
   border-radius: 12px;
   transition: transform 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.card .title {
+  color: var(--sl-color-text);
+}
+
+.card .body {
+  color: var(--sl-color-text-secondary);
 }
 
 .card:hover {
   transform: translateY(-3px);
   border-color: var(--sl-color-accent);
   box-shadow: 0 8px 24px color-mix(in srgb, var(--sl-color-accent) 8%, transparent);
+}
+
+[data-theme='dark'] .card {
+  background-color: var(--sl-color-bg-tertiary);
+}
+
+/* ── Asides ───────────────────────────────────────────────────── */
+/* Fix: Starlight aside defaults to white text (dark-mode only) */
+.starlight-aside,
+.starlight-aside__content {
+  color: var(--sl-color-text);
 }
 
 /* ── Search ───────────────────────────────────────────────────── */
