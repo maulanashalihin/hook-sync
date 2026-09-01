@@ -79,7 +79,7 @@ Every table uses `id TEXT PRIMARY KEY` with UUID. This eliminates the need for:
 Two nodes creating rows simultaneously produce different UUIDs. `INSERT OR REPLACE` never collides. On reconnect, both rows merge.
 
 <Aside type="note" title="UUIDv7 recommended">
-UUIDv7 is recommended — time-ordered IDs give sequential B-tree inserts (the primary hook-sync workload). v4 works as fallback (`crypto.randomUUID()` native, but random insert order causes B-tree page splits at scale). Node 26+ will have `crypto.randomUUIDv7()` native ([PR #62553](https://github.com/nodejs/node/pull/62553)). Benchmarks: `go/bench/bench_uuid.go`, `bun/bench-uuid.ts`.
+UUIDv7 is recommended — time-ordered IDs give sequential B-tree inserts (the primary hook-sync workload). v4 works as fallback (`crypto.randomUUID()` native, but random insert order causes B-tree page splits at scale). Go: `uuid.NewV7()`. Bun: optimized hex-table impl. Node: [`uuidv7`](https://www.npmjs.com/package/uuidv7) package (1.8x faster than v4 on insert). Node 26+ will have `crypto.randomUUIDv7()` native ([PR #62553](https://github.com/nodejs/node/pull/62553)). Benchmarks: `go/bench/bench_uuid.go`, `bun/bench-uuid.ts`.
 </Aside>
 
 ## Hook Capture Mode (Go-only, opt-in)

@@ -137,7 +137,7 @@ UUIDv7 is recommended — time-ordered IDs give sequential B-tree inserts, which
 |----------|-------------|-----|
 | Go | UUIDv7 | `uuid.NewV7()` — time-ordered → sequential B-tree insert (benchmark: `go/bench/bench_uuid.go`) |
 | Bun | UUIDv7 | Optimized hex-table impl — 1.2-1.5x faster than v4 on sequential insert despite slower generation (benchmark: `bun/bench-uuid.ts`) |
-| Node | UUIDv7 | Use optimized hex-table impl. Node 26+ will have `crypto.randomUUIDv7()` native ([PR #62553](https://github.com/nodejs/node/pull/62553)) |
+| Node | UUIDv7 | [`uuidv7`](https://www.npmjs.com/package/uuidv7) package — 1.8x faster than v4 on sequential insert (benchmark: `go/bench/bench_uuid.go`, `bun/bench-uuid.ts`). Node 26+ will have `crypto.randomUUIDv7()` native ([PR #62553](https://github.com/nodejs/node/pull/62553)) |
 | Any | UUIDv4 (fallback) | `crypto.randomUUID()` native — fastest generation, but random insert order causes B-tree page splits at scale |
 
 ## Architecture
