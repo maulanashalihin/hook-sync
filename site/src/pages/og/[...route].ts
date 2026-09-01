@@ -14,6 +14,11 @@ const pages = Object.fromEntries(
 		},
 	]),
 );
+// Add landing page (not part of docs collection)
+pages["home"] = {
+	title: "hook-sync",
+	description: "SQLite replication that just works. Multi-server, multi-writer, multi-runtime. Zero data loss.",
+};
 
 export const { getStaticPaths, GET } = await OGImageRoute({
 	pages,
