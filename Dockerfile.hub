@@ -1,0 +1,30 @@
+# hook-sync-hub — dedicated relay node
+# Pure Go + Pebble, no CGO required
+# Usage:
+#   docker build -t hook-sync-hub .
+#   docker run -d --name hub1 -p 9010:9010 \
+#     -e HUB_ID=hub1 \
+#     -e HUB_LISTEN=:9010 \
+#     -e HUB_EDGES=http://edge1:9001,http://edge2:9002,http://edge3:9003 \
+#     -v hub1-data:/data \
+#     hook-sync-hub
+
+FROM golang:1.26-alpine AS builder
+
+WORKDIR /build
+COPY go/go.mod go/go.sum ./
+RUN go mod download
+
+COPY go/ .
+RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /hook-sync-hub ./cmd/hub/
+
+FROM alpine:3.20
+
+RUN apk add --no-cache ca-certificates
+COPY --from=builder /hook-sync-hub /usr/local/bin/hook-sync-hub
+
+VOLUME /data
+EXPOSE 9010
+
+ENTRYPOINT ["hook-sync-hub"]
+CMD ["-id", "hub1", "-listen", ":9010", "-db", "/data/hub.pebble"]

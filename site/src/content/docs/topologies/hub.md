@@ -31,9 +31,40 @@ A dual-purpose hub (serves `/api/items` AND relays) has a problem: the `syncing`
 | `syncing` flag problem? | Yes — blocks forward | No — no triggers |
 | Client traffic? | Yes — competes with relay | No — pure relay |
 
-## Setup
+### 0. Install the hub binary
 
-### 1. Run the hub (Go binary)
+No Go toolchain needed. Download pre-built binary from [GitHub Releases](https://github.com/maulanashalihin/hook-sync/releases):
+
+```bash
+# Linux amd64
+curl -L https://github.com/maulanashalihin/hook-sync/releases/download/v0.1.0/hook-sync-hub-linux-amd64.tar.gz | tar xz
+chmod +x hook-sync-hub-linux-amd64
+
+# macOS Apple Silicon
+curl -L https://github.com/maulanashalihin/hook-sync/releases/download/v0.1.0/hook-sync-hub-darwin-arm64.tar.gz | tar xz
+chmod +x hook-sync-hub-darwin-arm64
+```
+
+Available: `linux-amd64`, `linux-arm64`, `darwin-amd64` (Intel), `darwin-arm64` (Apple Silicon).
+
+### Run hub with Docker
+
+```bash
+docker build -t hook-sync-hub -f Dockerfile.hub .
+
+docker run -d --name hub1 -p 9010:9010 \
+  -v hub1-data:/data \
+  hook-sync-hub \
+  -id hub1 -listen :9010 -db /data/hub.pebble \
+  -edge http://edge1:9001 \
+  -edge http://edge2:9002 \
+  -edge http://edge3:9003
+```
+
+Pebble data persists in the `hub1-data` volume. Hub is pure Go + Pebble — no CGO, image is ~15MB.
+
+### 1. Run the hub (build from source)
+
 
 ```bash
 cd go && go build -o ../hook-sync-hub ./cmd/hub
