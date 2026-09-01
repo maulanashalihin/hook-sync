@@ -82,6 +82,17 @@ code, pre, kbd, samp {
   background: color-mix(in srgb, var(--sl-color-bg) 75%, transparent);
 }
 
+/* Brand: match landing page — bold, tight letter-spacing */
+.site-brand {
+  font-weight: 800;
+  letter-spacing: -0.03em;
+}
+
+.site-brand img {
+  width: 28px;
+  height: 28px;
+}
+
 /* ── Sidebar ──────────────────────────────────────────────────── */
 .sidebar-top {
   padding-top: 1rem;
