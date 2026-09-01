@@ -79,8 +79,8 @@ Pick one runtime. All three sync to each other — you can mix and match.
    const db = new Database("app.db");
    db.exec("PRAGMA journal_mode = WAL");
    db.exec(`CREATE TABLE IF NOT EXISTS items(
-     id TEXT PRIMARY KEY, name TEXT, value INTEGER,
-     created_at INTEGER, updated_at INTEGER, node_id TEXT
+    id TEXT PRIMARY KEY, name TEXT, value INTEGER,
+    created_at INTEGER, updated_at INTEGER
    );`);
 
    const mgr = attach(db, {
@@ -137,8 +137,8 @@ Pick one runtime. All three sync to each other — you can mix and match.
    const db = new Database("app.db");
    db.pragma("journal_mode = WAL");
    db.exec(`CREATE TABLE IF NOT EXISTS items(
-     id TEXT PRIMARY KEY, name TEXT, value INTEGER,
-     created_at INTEGER, updated_at INTEGER, node_id TEXT
+    id TEXT PRIMARY KEY, name TEXT, value INTEGER,
+    created_at INTEGER, updated_at INTEGER
    );`);
 
    const mgr = attach(db, {
@@ -185,7 +185,6 @@ Every synced table **must** have:
 
 - `id` — `TEXT PRIMARY KEY` (UUID, zero conflict)
 - `updated_at` — `INTEGER` (millisecond timestamp, for last-write-wins)
-- `node_id` — `TEXT` (origin node, for debugging)
 
 ```sql
 CREATE TABLE items(
@@ -193,8 +192,7 @@ CREATE TABLE items(
   name TEXT,
   value INTEGER,
   created_at INTEGER,
-  updated_at INTEGER,
-  node_id TEXT
+  updated_at INTEGER
 );
 ```
 

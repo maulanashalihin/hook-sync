@@ -33,8 +33,7 @@ db.exec(`
     name TEXT,
     value INTEGER,
     created_at INTEGER,
-    updated_at INTEGER,
-    node_id TEXT
+    updated_at INTEGER
   );
 `);
 

@@ -252,7 +252,7 @@ db.exec("PRAGMA journal_mode = WAL");
 // Your table — must have `id` (TEXT PRIMARY KEY) and `updated_at` (INTEGER) columns
 db.exec(`CREATE TABLE IF NOT EXISTS items(
   id TEXT PRIMARY KEY, name TEXT, value INTEGER,
-  created_at INTEGER, updated_at INTEGER, node_id TEXT
+  created_at INTEGER, updated_at INTEGER
 );`);
 
 // Attach sync — creates _meta, _changes, _dead_letter, _peer_state tables

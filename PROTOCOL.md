@@ -11,7 +11,7 @@ Each change is a JSON object:
 {
   "op": "INSERT",
   "table": "items",
-  "row": { "id": "0191a2b3-...", "name": "foo", "value": 42, "created_at": 1700000000000, "updated_at": 1700000000000, "node_id": "nodeA" },
+  "row": { "id": "0191a2b3-...", "name": "foo", "value": 42, "created_at": 1700000000000, "updated_at": 1700000000000 },
   "old_id": null
 }
 ```
@@ -31,7 +31,7 @@ DELETE changes carry the full OLD row in `row` (not null). This includes `update
 {
   "op": "DELETE",
   "table": "items",
-  "row": { "id": "abc-123", "name": "foo", "value": 42, "created_at": 1700000000000, "updated_at": 1700000005000, "node_id": "nodeA" },
+  "row": { "id": "abc-123", "name": "foo", "value": 42, "created_at": 1700000000000, "updated_at": 1700000005000 },
   "old_id": "abc-123"
 }
 ```
@@ -181,7 +181,6 @@ Every table that participates in sync MUST have:
 
 - `id TEXT PRIMARY KEY` (UUID)
 - `updated_at INTEGER` (millisecond timestamp, used for last-write-wins conflict resolution)
-- `node_id TEXT` (origin node, for debugging)
 
 ## Capture Mechanism
 
@@ -193,7 +192,7 @@ WHEN (SELECT value FROM _meta WHERE key = 'syncing') = 0
 BEGIN
   INSERT INTO _changes(op, row_id, row_data)
   VALUES('INSERT', NEW.id, json_object('id', NEW.id, 'name', NEW.name, 'value', NEW.value,
-    'created_at', NEW.created_at, 'updated_at', NEW.updated_at, 'node_id', NEW.node_id));
+    'created_at', NEW.created_at, 'updated_at', NEW.updated_at));
 END;
 
 CREATE TRIGGER items_au AFTER UPDATE ON items
@@ -201,7 +200,7 @@ WHEN (SELECT value FROM _meta WHERE key = 'syncing') = 0
 BEGIN
   INSERT INTO _changes(op, row_id, row_data)
   VALUES('UPDATE', NEW.id, json_object('id', NEW.id, 'name', NEW.name, 'value', NEW.value,
-    'created_at', NEW.created_at, 'updated_at', NEW.updated_at, 'node_id', NEW.node_id));
+    'created_at', NEW.created_at, 'updated_at', NEW.updated_at));
 END;
 
 CREATE TRIGGER items_ad AFTER DELETE ON items
@@ -209,7 +208,7 @@ WHEN (SELECT value FROM _meta WHERE key = 'syncing') = 0
 BEGIN
   INSERT INTO _changes(op, row_id, row_data)
   VALUES('DELETE', OLD.id, json_object('id', OLD.id, 'name', OLD.name, 'value', OLD.value,
-    'created_at', OLD.created_at, 'updated_at', OLD.updated_at, 'node_id', OLD.node_id));
+    'created_at', OLD.created_at, 'updated_at', OLD.updated_at));
 END;
 ```
 
