@@ -131,10 +131,12 @@ Ship failures retry with exponential backoff (50/100/200/400/800ms, 5 attempts).
 
 Multi-writer without UUID = data loss. Integer auto-increment collides across nodes (both get rowid 1, 2, 3 → `INSERT OR REPLACE` overwrites silently). UUID gives every node independent IDs — no coordinator, no collision, no CRDT.
 
-| Language | UUID | Why |
-|----------|------|-----|
-| Go | UUIDv7 | B-tree is bottleneck → time-ordered = sequential insert |
-| Bun | UUIDv4 | `crypto.randomUUID()` native → generation is bottleneck |
+Any UUID version works — v4 or v7, pick what's fastest in your runtime:
+
+| Language | Preferred | Why |
+|----------|-----------|-----|
+| Go | UUIDv7 | Time-ordered → sequential B-tree insert (benchmark: `go/bench/bench_uuid.go`) |
+| Bun | UUIDv4 | `crypto.randomUUID()` native → generation is the bottleneck, not insert |
 | Node | UUIDv4 | `crypto.randomUUID()` native → same as Bun |
 
 ## Architecture
