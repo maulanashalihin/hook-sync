@@ -116,7 +116,7 @@ Build with the `sqlite_preupdate_hook` tag:
 go build -tags sqlite_preupdate_hook -o myapp ./cmd/myapp
 ```
 
-<Aside type="warning" title="Hook mode is Go-only">
+<Aside type="caution" title="Hook mode is Go-only">
 `preupdate_hook` is a C-level SQLite API not exposed by `bun:sqlite` or `better-sqlite3`. Hook mode nodes still sync to trigger mode nodes — the wire protocol is identical.
 </Aside>
 

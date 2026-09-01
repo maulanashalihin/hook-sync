@@ -1,13 +1,13 @@
 ---
-title: Bun
-description: SQLite replication for Bun apps. hooksync.js library + bun:sqlite. Trigger-based capture, ACK-based sync.
+title: Node.js
+description: SQLite replication for Node.js apps. hooksync.js library + better-sqlite3. Trigger-based capture, ACK-based sync.
 ---
 
 import { Aside, Steps, Card, CardGrid } from '@astrojs/starlight/components';
 
-# Bun
+# Node.js
 
-hook-sync works with Bun via the [`hooksync.js`](https://www.npmjs.com/package/hooksync.js) npm package and `bun:sqlite`. Trigger-based capture only (no preupdate_hook in `bun:sqlite`).
+hook-sync works with Node.js via the [`hooksync.js`](https://www.npmjs.com/package/hooksync.js) npm package and `better-sqlite3`. Trigger-based capture only (no preupdate_hook in `better-sqlite3`).
 
 ## Quick Start
 
@@ -16,17 +16,18 @@ hook-sync works with Bun via the [`hooksync.js`](https://www.npmjs.com/package/h
 1. **Install the library**
 
    ```bash
-   bun add hooksync.js
+   npm install hooksync.js better-sqlite3
    ```
 
-2. **Create `server.ts`**
+2. **Create `server.js`**
 
-   ```ts
-   import { attach } from "hooksync.js";
-   import { Database } from "bun:sqlite";
+   ```js
+   const { attach } = require("hooksync.js");
+   const Database = require("better-sqlite3");
+   const http = require("http");
 
    const db = new Database("app.db");
-   db.exec("PRAGMA journal_mode = WAL");
+   db.pragma("journal_mode = WAL");
    db.exec(`CREATE TABLE IF NOT EXISTS items(
     id TEXT PRIMARY KEY, name TEXT, value INTEGER,
     created_at INTEGER, updated_at INTEGER
@@ -38,30 +39,32 @@ hook-sync works with Bun via the [`hooksync.js`](https://www.npmjs.com/package/h
      batchMs: 50,
    }, ["items"]);
 
-   Bun.serve({
-     port: 9001,
-     fetch(req) {
-       const url = new URL(req.url);
-       if (req.method === "POST" && url.pathname === "/sync") {
-         return req.json().then((body) => {
-           const applied = mgr.applyChanges(body.changes);
-           return Response.json({ applied, ack: body.batch_id });
-         });
-       }
-       if (req.method === "GET" && url.pathname === "/health") {
-         return Response.json(mgr.health());
-       }
-       return new Response("not found", { status: 404 });
-     },
+   const server = http.createServer(async (req, res) => {
+     if (req.method === "POST" && req.url === "/sync") {
+       const body = JSON.parse(await readBody(req));
+       const applied = mgr.applyChanges(body.changes);
+       res.writeHead(200, { "Content-Type": "application/json" });
+       res.end(JSON.stringify({ applied, ack: body.batch_id }));
+       return;
+     }
+     if (req.method === "GET" && req.url === "/health") {
+       res.writeHead(200, { "Content-Type": "application/json" });
+       res.end(JSON.stringify(mgr.health()));
+       return;
+     }
+     res.writeHead(404);
+     res.end("not found");
    });
+
+   server.listen(9001);
    ```
 
 3. **Run two instances**
 
    ```bash
-   bun server.ts   # node1 on :9001
+   node server.js   # node1 on :9001
    # In another terminal, change port to 9002 and peer to 9001
-   bun server.ts
+   node server.js
    ```
 
 4. **Write to node A, verify on node B**
@@ -83,7 +86,7 @@ hook-sync works with Bun via the [`hooksync.js`](https://www.npmjs.com/package/h
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `db` | `Database` | `bun:sqlite` instance. Caller opens it. |
+| `db` | `Database` | `better-sqlite3` instance. Caller opens it. |
 | `config` | `Config` | `{ id: string, peers: string[], batchMs?: number, batchSize?: number }` |
 | `tables` | `string[]` | Table names to sync. Triggers auto-generated via `PRAGMA table_info`. |
 
@@ -97,36 +100,52 @@ Returns a `Manager`:
 
 ## HTTP Server (Required)
 
-<Aside type="warning" title="The library does NOT include an HTTP server">
-You must wire `Bun.serve()` yourself and route `POST /sync` to `mgr.applyChanges()`. This is intentional — you may already have an HTTP server.
+<Aside type="caution" title="The library does NOT include an HTTP server">
+You must wire your own HTTP server and route `POST /sync` to `mgr.applyChanges()`. This is intentional — you may already have an HTTP server.
 </Aside>
 
-```ts
-Bun.serve({
-  port: 9001,
-  fetch(req) {
-    const url = new URL(req.url);
+### Using `http.createServer`
 
-    // /sync — receive changes from peers
-    if (req.method === "POST" && url.pathname === "/sync") {
-      return req.json().then((body) => {
-        const applied = mgr.applyChanges(body.changes);
-        return Response.json({ applied, ack: body.batch_id });
-      });
-    }
+```js
+const http = require("http");
 
-    // /health
-    if (req.method === "GET" && url.pathname === "/health") {
-      return Response.json(mgr.health());
-    }
+const server = http.createServer(async (req, res) => {
+  if (req.method === "POST" && req.url === "/sync") {
+    const body = JSON.parse(await readBody(req));
+    const applied = mgr.applyChanges(body.changes);
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ applied, ack: body.batch_id }));
+    return;
+  }
 
-    // ... your CRUD endpoints here
-    return new Response("not found", { status: 404 });
-  },
+  if (req.method === "GET" && req.url === "/health") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(mgr.health()));
+    return;
+  }
+
+  // ... your CRUD endpoints here
+  res.writeHead(404);
+  res.end("not found");
+});
+
+server.listen(9001);
+```
+
+### Using Express / Hono / HyperExpress
+
+```js
+app.post("/sync", async (req, res) => {
+  const applied = mgr.applyChanges(req.body.changes);
+  res.json({ applied, ack: req.body.batch_id });
+});
+
+app.get("/health", (req, res) => {
+  res.json(mgr.health());
 });
 ```
 
-The pattern: parse JSON body, call `mgr.applyChanges(body.changes)`, return `{ applied, ack: body.batch_id }`.
+The pattern is always the same: parse JSON body, call `mgr.applyChanges(body.changes)`, return `{ applied, ack: body.batch_id }`.
 
 ## Table Requirements
 
@@ -157,7 +176,7 @@ When you call `attach()`, the library:
 
 ## Multi-Peer (Full Mesh)
 
-```ts
+```js
 const mgr = attach(db, {
   id: "nodeA",
   peers: [
@@ -175,7 +194,7 @@ Each peer has its own watermark. Changes deleted from `_changes` only after **al
 
 For 8+ nodes, use a dedicated hub — a Go-only relay binary. From the JS library's perspective, the hub is just a peer URL:
 
-```ts
+```js
 const mgr = attach(db, {
   id: "edge1",
   peers: ["http://localhost:9010"],  // hub URL — same as any peer
@@ -187,22 +206,31 @@ See [Dedicated Hub](/topologies/hub/) for hub setup.
 
 ## UUIDv7 Recommended
 
-UUIDv7 gives time-ordered IDs → sequential B-tree inserts. Bun: optimized hex-table impl (benchmark: `bun/bench-uuid.ts`).
+UUIDv7 gives time-ordered IDs → sequential B-tree inserts. Node: [`uuidv7`](https://www.npmjs.com/package/uuidv7) package (1.8x faster than v4 on insert). Node 26+ will have `crypto.randomUUIDv7()` native ([PR #62553](https://github.com/nodejs/node/pull/62553)).
+
+```js
+const { uuidv7 } = require("uuidv7");
+const id = uuidv7(); // time-ordered UUID
+```
+
+## SQLite Binding Compatibility
+
+The library accepts a minimal `SqliteDatabase` interface — it never imports a binding:
 
 ```ts
-function uuidv7(): string {
-  const ts = Date.now();
-  const buf = new Uint8Array(16);
-  crypto.getRandomValues(buf);
-  // ... see bun/bench-uuid.ts for full implementation
-  return /* uuid string */;
+interface SqliteDatabase {
+  exec(sql: string): void;
+  prepare(sql: string): SqliteStatement;
+  transaction<T>(fn: T): T;
 }
 ```
 
+`better-sqlite3` satisfies this interface. Pass your existing instance — the library never opens or closes the database.
+
 ## What This Library Does NOT Do
 
-- **No HTTP server** — caller wires `Bun.serve()` or any framework
-- **No hook capture mode** — `bun:sqlite` has no preupdate hook API. Trigger-based only
+- **No HTTP server** — caller wires `http.createServer()`, Express, or any framework
+- **No hook capture mode** — `better-sqlite3` has no preupdate hook API. Trigger-based only
 - **No consensus** — no Raft, no coordinator, no leader election. Just triggers + HTTP + ACK
 
 <CardGrid stagger>
