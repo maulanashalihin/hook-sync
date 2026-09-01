@@ -47,6 +47,8 @@ App write (native SQLite speed)
   → Sender deletes from _changes only after ACK confirms
 ```
 
+Go also supports **hook capture mode** (`hook/` library, opt-in): instead of SQL triggers, a preupdate hook captures changes in-memory during the transaction, then a commit hook flushes them to Pebble as a single batch. This eliminates the `_changes` table write — 35% faster write throughput. Requires `sqlite_preupdate_hook` build tag (Go-only).
+
 In full mesh mode, the sender ships to all peers concurrently. Each peer has its own watermark (`_peer_state` table) — changes are deleted from `_changes` only after ALL peers have ACKed. Offline peers' changes accumulate until they reconnect.
 
 Sync runs in the background — it does not block the write path. The client gets its response as soon as SQLite write + capture completes.
@@ -141,13 +143,17 @@ hook-sync/
 ├── TOPOLOGY.md               # Topology recommendations (point-to-point, full mesh, hub)
 ├── ROADMAP.md                # Product vision, gap analysis, 7-phase roadmap
 ├── go/                       # Go implementation (Fiber + mattn/go-sqlite3)
-│   ├── cmd/                  #   binary entrypoints (deployable)
-│   │   ├── server/main.go    #     single-table, point-to-point
-│   │   ├── mesh/main.go      #     full mesh (multi-peer, per-peer watermark)
-│   │   ├── hub/main.go       #     dedicated hub (Pebble KV, pure relay — no client requests)
+│   ├── hooksync/             #   shared core: types, wire protocol, table-agnostic LWW apply
+│   ├── trigger/              #   trigger-based capture: Attach(db, config, tables) — auto-generates triggers
+│   ├── hook/                 #   preupdate_hook capture: Open(path, config, tables) — Pebble-backed, 35% faster
+│   ├── cmd/                  #   binary entrypoints (thin wrappers over libraries)
+│   │   ├── server/main.go    #     trigger/ library, single-peer, --no-trigger baseline
+│   │   ├── mesh/main.go      #     trigger/ library, multi-peer, per-peer watermark
+│   │   ├── hookserver/main.go#     hook/ library, --in-memory flag for Pebble vs in-memory
+│   │   ├── hub/main.go       #     dedicated hub (Pebble KV, pure relay — no SQLite)
 │   │   └── multitable/main.go#     multi-table (items + categories)
-│   ├── hookmem/              #   experimental: preupdate_hook + in-memory (no persistence, benchmark baseline)
-│   ├── hookpebble/           #   experimental: preupdate_hook + Pebble (same-txn safe, prototype for hook/ library)
+│   ├── hookpebble/           #   legacy: preupdate_hook + Pebble (refactored to use hook/ library)
+│   ├── hookmem/              #   research: preupdate_hook + in-memory (no persistence, benchmark baseline only)
 │   └── bench/                #   direct SQLite benchmarks (trigger overhead, hook vs trigger)
 ├── bun/                      # Bun implementation (Bun.serve + bun:sqlite)
 │   ├── server.ts             #   single-table, point-to-point
@@ -169,20 +175,66 @@ hook-sync/
 
 | Language | Capture | Binding | HTTP server |
 |----------|---------|---------|-------------|
-| Go | SQLite triggers + `_changes` | mattn/go-sqlite3 | Fiber (fasthttp) |
+| Go | `trigger/` (SQL triggers) or `hook/` (preupdate_hook + Pebble, 35% faster) | mattn/go-sqlite3 | Fiber (fasthttp) |
 | Bun | SQLite triggers + `_changes` | bun:sqlite (built-in) | Bun.serve (native) |
 | Node | SQLite triggers + `_changes` | better-sqlite3 | hyper-express (uWebSockets) |
 
-All implementations use the same capture mechanism (triggers + `_changes` table) and the same wire protocol. Nodes in different languages sync to each other bidirectionally. See [PROTOCOL.md](PROTOCOL.md) — copy it into any language.
+Go offers two capture modes via importable libraries: `trigger/` (default, database-level, cross-runtime) and `hook/` (opt-in, connection-level, Go-only, preupdate_hook + Pebble batch). Both share the same wire protocol — trigger nodes sync to hook nodes. Bun and Node use trigger-based capture only.
+
+
+## Go Libraries
+
+The Go replication core is extracted into three importable packages. Pick capture mode at import time:
+
+| Package | API | Capture | Build tag | Use when |
+|---------|-----|--------|-----------|----------|
+| `hooksync/` | `Change`, `Config`, `ShipWithAck()`, `ApplyChange()` | — (shared core) | none | Always (both modes depend on it) |
+| `trigger/` | `Attach(db, config, tables)` | SQL triggers + `_changes` | none | Default — cross-runtime, database-level |
+| `hook/` | `Open(path, config, tables)`, `OpenInMemory()` | preupdate_hook + Pebble | `sqlite_preupdate_hook` | Opt-in — 35% faster, Go-only, connection-level |
+
+```go
+import (
+    "hook-sync/hooksync"
+    "hook-sync/trigger"  // or "hook-sync/hook" for preupdate_hook mode
+)
+
+// trigger/ mode (default)
+db, _ := sql.Open("sqlite3", "app.db")
+mgr, _ := trigger.Attach(db, hooksync.Config{
+    ID: "node1", Peers: []string{"http://peer:9002"},
+}, []string{"items"})
+defer mgr.Stop()
+
+// hook/ mode (35% faster, requires build tag)
+mgr, _ := hook.Open("app.db", hooksync.Config{
+    ID: "node1", Peers: []string{"http://peer:9002"},
+}, []string{"items"})
+defer mgr.Stop()
+```
+
+`ApplyChange()` is table-agnostic — column names come from `Change.Row` map, no hardcoded columns. `validTable()` validates table names (alphanumeric + underscore only) as defense-in-depth against SQL injection via table names (SQLite doesn't support parameterized table names).
 
 ## Build & Run
 
 ### Go
 
+```bash
 cd go
 go build -o ../hook-sync-go ./cmd/server
 
 ./hook-sync-go -id node1 -db node1.db -listen :9001 -peer http://localhost:9002 -batch-ms 50 -batch-size 10000
+```
+
+Hook capture mode (preupdate_hook + Pebble, 35% faster — requires build tag):
+
+```bash
+cd go
+go build -tags sqlite_preupdate_hook -o ../hook-sync-hookserver ./cmd/hookserver
+
+./hook-sync-hookserver -id node1 -db node1.db -listen :9001 -peer http://localhost:9002 -batch-ms 50 -batch-size 10000
+
+# In-memory mode (no Pebble, no persistence — research/benchmark only):
+./hook-sync-hookserver -id node1 -db node1.db -listen :9001 -peer http://localhost:9002 -in-memory
 ```
 
 ### Bun
@@ -467,11 +519,11 @@ The protocol is language-agnostic. Read [PROTOCOL.md](PROTOCOL.md) — it's ~300
 
 No consensus. No Raft. No coordinator. Just triggers + HTTP + ACK.
 
-Reference implementations: `go/cmd/server/main.go` (~300 lines), `bun/server.ts` (~200 lines), `node/server.js` (~200 lines). All three sync to each other.
+Reference implementations: `go/cmd/server/main.go` (thin wrapper over `trigger/` library, ~240 lines), `go/cmd/hookserver/main.go` (thin wrapper over `hook/` library), `bun/server.ts` (~200 lines), `node/server.js` (~200 lines). All three sync to each other. Go libraries: `hooksync/` (shared core), `trigger/` (trigger capture), `hook/` (preupdate_hook capture).
 
 ## Limitations
 
-- **Multi-table requires manual setup** — adding a table means writing triggers + updating applyChanges dispatch (see `go/cmd/multitable/`, `bun/server-multitable.ts`, `node/server-multitable.js` for 2-table example)
+- **Multi-table setup** — Go libraries (`trigger/`, `hook/`) are table-agnostic: pass table names to `Attach()`/`Open()`, triggers/hooks are auto-generated via schema introspection. Bun and Node still require manual trigger setup per table (see `go/cmd/multitable/`, `bun/server-multitable.ts`, `node/server-multitable.js` for 2-table example)
 - **Localhost benchmark variance** — HTTP throughput varies 3-8x on localhost; use real network for reliable comparison
 - **Last-write-wins, not CRDT** — split-brain conflicts resolve by timestamp. Older update is silently dropped. Fine for append-heavy workloads; for collaborative editing of shared rows, use cr-sqlite
 
