@@ -5,8 +5,6 @@ description: Last-write-wins by timestamp conflict resolution. Both nodes always
 
 import { Aside } from '@astrojs/starlight/components';
 
-# Split-Brain Safety
-
 When the network splits and both nodes accept writes independently, hook-sync uses **last-write-wins by timestamp** to resolve conflicts on reconnect. This guarantees both nodes converge to the same state — no divergence, no silent data corruption.
 
 ## Conflict Scenarios
