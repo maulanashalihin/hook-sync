@@ -1,15 +1,15 @@
 #!/bin/bash
 # bench-splitbrain-hook.sh — Split-brain safety test across capture modes
 #
-# Tests per mode (trigger, hookpebble, hookmem):
+# Tests per mode (trigger, hookpebble):
 #   1. INSERT during partition (UUID, no collision)
 #   2. UPDATE vs UPDATE during partition (last-write-wins by timestamp)
 #   3. DELETE vs UPDATE during partition (UPDATE wins if newer)
 #   4. Connection failure (peer down → retry, no dead letter)
-#   5. Crash recovery (changes survive in _changes / Pebble / in-memory)
+#   5. Crash recovery (changes survive in _changes / Pebble)
 #
 # Usage: bash bench-splitbrain-hook.sh [mode]
-#   mode: trigger | hookpebble | hookmem | all (default: all)
+#   mode: trigger | hookpebble | all (default: all)
 
 set -uo pipefail
 
@@ -34,13 +34,9 @@ HOOKPEBBLE_PASS=0
 HOOKPEBBLE_FAIL=0
 HOOKPEBBLE_TOTAL=0
 HOOKPEBBLE_RAN=0
-HOOKMEM_PASS=0
-HOOKMEM_FAIL=0
-HOOKMEM_TOTAL=0
-HOOKMEM_RAN=0
 
 cleanup() {
-	pkill -9 -f "hook-sync-go.*1910|hook-sync-hookpebble.*1910|hook-sync-hookmem.*1910" 2>/dev/null || true
+	pkill -9 -f "hook-sync-go.*1910|hook-sync-hookserver.*1910" 2>/dev/null || true
 	sleep 1
 	rm -f $DB_A $DB_B $DB_A-wal $DB_A-shm $DB_B-wal $DB_B-shm $LOG_A $LOG_B 2>/dev/null || true
 	rm -rf /tmp/splitbrain-hook_a.db.pebble /tmp/splitbrain-hook_b.db.pebble 2>/dev/null || true
@@ -59,16 +55,9 @@ start_cmd() {
 		;;
 	hookpebble)
 		if [ -z "$peer" ]; then
-			echo "$ROOT/hook-sync-hookpebble -id $id -db $db -listen :$port -batch-ms 50 -batch-size 10000"
+			echo "$ROOT/hook-sync-hookserver -id $id -db $db -listen :$port -batch-ms 50 -batch-size 10000"
 		else
-			echo "$ROOT/hook-sync-hookpebble -id $id -db $db -listen :$port -peer $peer -batch-ms 50 -batch-size 10000"
-		fi
-		;;
-	hookmem)
-		if [ -z "$peer" ]; then
-			echo "$ROOT/hook-sync-hookmem -id $id -db $db -listen :$port -batch-ms 50 -batch-size 10000"
-		else
-			echo "$ROOT/hook-sync-hookmem -id $id -db $db -listen :$port -peer $peer -batch-ms 50 -batch-size 10000"
+			echo "$ROOT/hook-sync-hookserver -id $id -db $db -listen :$port -peer $peer -batch-ms 50 -batch-size 10000"
 		fi
 		;;
 	esac
@@ -83,7 +72,7 @@ start_node() {
 }
 
 kill_nodes() {
-	pkill -9 -f "hook-sync-go.*1910|hook-sync-hookpebble.*1910|hook-sync-hookmem.*1910" 2>/dev/null || true
+	pkill -9 -f "hook-sync-go.*1910|hook-sync-hookserver.*1910" 2>/dev/null || true
 	sleep 1
 }
 
@@ -167,11 +156,7 @@ run_splitbrain_test() {
 	echo ""
 	echo ">>> Phase 2: Network partition — kill both nodes"
 	kill_nodes
-	if [ "$mode" = "hookmem" ]; then
-		echo "  ⚠️  hookmem: in-memory pending changes LOST on kill (no persistence)"
-	else
-		echo "  Changes survive in $([ "$mode" = "trigger" ] && echo "_changes table" || echo "Pebble") (disk)"
-	fi
+	echo "  Changes survive in $([ "$mode" = "trigger" ] && echo "_changes table" || echo "Pebble") (disk)"
 
 	# --- Phase 3: Independent updates during partition ---
 	echo ""
@@ -285,24 +270,16 @@ run_splitbrain_test() {
 		HOOKPEBBLE_TOTAL=$TOTAL
 		HOOKPEBBLE_RAN=1
 		;;
-	hookmem)
-		HOOKMEM_PASS=$PASS
-		HOOKMEM_FAIL=$FAIL
-		HOOKMEM_TOTAL=$TOTAL
-		HOOKMEM_RAN=1
-		;;
 	esac
 
 	cleanup
 }
 
 # Build all binaries
-echo "Building trigger server (go/cmd/server)..."
+echo "Building trigger server (go/cmd/server, trigger/ library)..."
 cd "$ROOT/go" && go build -o "$ROOT/hook-sync-go" ./cmd/server 2>&1
-echo "Building hookpebble server (go/hookpebble)..."
-cd "$ROOT/go" && go build -tags sqlite_preupdate_hook -o "$ROOT/hook-sync-hookpebble" ./hookpebble/ 2>&1
-echo "Building hookmem server (go/hookmem)..."
-cd "$ROOT/go" && go build -tags sqlite_preupdate_hook -o "$ROOT/hook-sync-hookmem" ./hookmem/ 2>&1
+echo "Building hook server (go/cmd/hookserver, hook/ library)..."
+cd "$ROOT/go" && go build -tags sqlite_preupdate_hook -o "$ROOT/hook-sync-hookserver" ./cmd/hookserver 2>&1
 cd "$ROOT"
 
 echo ""
@@ -315,14 +292,12 @@ echo "############################################"
 case "$MODE" in
 trigger) run_splitbrain_test "trigger" ;;
 hookpebble) run_splitbrain_test "hookpebble" ;;
-hookmem) run_splitbrain_test "hookmem" ;;
 all)
 	run_splitbrain_test "trigger"
 	run_splitbrain_test "hookpebble"
-	run_splitbrain_test "hookmem"
 	;;
 *)
-	echo "Unknown mode: $MODE (use: trigger, hookpebble, hookmem, all)"
+	echo "Unknown mode: $MODE (use: trigger, hookpebble, all)"
 	exit 1
 	;;
 esac
@@ -351,7 +326,6 @@ print_result() {
 
 [ "$TRIGGER_RAN" -eq 1 ] && print_result "TRIGGER" $TRIGGER_PASS $TRIGGER_FAIL $TRIGGER_TOTAL
 [ "$HOOKPEBBLE_RAN" -eq 1 ] && print_result "HOOK+PEBBLE" $HOOKPEBBLE_PASS $HOOKPEBBLE_FAIL $HOOKPEBBLE_TOTAL
-[ "$HOOKMEM_RAN" -eq 1 ] && print_result "HOOK+MEMORY" $HOOKMEM_PASS $HOOKMEM_FAIL $HOOKMEM_TOTAL
 
 echo ""
 echo "  Total: $TOTAL_PASS/$TOTAL_CHECKS passed, $TOTAL_FAIL failed"
