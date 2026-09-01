@@ -261,6 +261,41 @@ a {
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--sl-color-accent) 15%, transparent);
 }
 
+/* ── Light Mode Fixes: dark-mode elements in light theme ──────── */
+/* Search button: Starlight hardcodes var(--sl-color-black) bg */
+button[data-open-modal] {
+  background-color: var(--sl-color-bg-tertiary);
+  border: 1px solid var(--sl-color-border);
+  color: var(--sl-color-text-secondary);
+}
+button[data-open-modal]:hover {
+  color: var(--sl-color-text);
+  border-color: var(--sl-color-border-secondary);
+}
+button[data-open-modal] kbd {
+  background-color: var(--sl-color-bg-secondary);
+}
+
+/* Mobile menu toggle: same black bg issue */
+starlight-menu-button button {
+  background-color: var(--sl-color-bg-tertiary);
+  border: 1px solid var(--sl-color-border);
+  color: var(--sl-color-text-secondary);
+}
+
+/* TOC toggle + dropdown (right sidebar): same black bg issue */
+.toggle,
+.dropdown {
+  background-color: var(--sl-color-bg-tertiary) !important;
+  color: var(--sl-color-text-secondary) !important;
+}
+
+/* Sidebar active link: softer highlight for light mode */
+.sidebar-group-link[aria-current='page'] {
+  background: color-mix(in srgb, var(--sl-color-accent) 10%, transparent);
+  color: var(--sl-color-accent);
+}
+
 /* ── Page Title ───────────────────────────────────────────────── */
 .content > h1 {
   font-weight: 800;
