@@ -139,11 +139,16 @@ Multi-writer without UUID = data loss. Integer auto-increment collides across no
 hook-sync/
 ├── PROTOCOL.md               # Wire protocol spec (copy to any language)
 ├── TOPOLOGY.md               # Topology recommendations (point-to-point, full mesh, hub)
+├── ROADMAP.md                # Product vision, gap analysis, 7-phase roadmap
 ├── go/                       # Go implementation (Fiber + mattn/go-sqlite3)
-│   ├── main.go               #   single-table, point-to-point
-│   ├── mesh/main.go          #   full mesh (multi-peer, per-peer watermark)
-│   ├── hub/main.go           #   dedicated hub (Pebble KV, star topology relay)
-│   ├── multitable/main.go    #   multi-table (items + categories)
+│   ├── cmd/                  #   binary entrypoints (deployable)
+│   │   ├── server/main.go    #     single-table, point-to-point
+│   │   ├── mesh/main.go      #     full mesh (multi-peer, per-peer watermark)
+│   │   ├── hub/main.go       #     dedicated hub (Pebble KV, pure relay — no client requests)
+│   │   └── multitable/main.go#     multi-table (items + categories)
+│   ├── hookmem/              #   experimental: preupdate_hook + in-memory (no persistence)
+│   ├── hookpebble/           #   experimental: preupdate_hook + Pebble (same-txn safe)
+│   └── bench/                #   direct SQLite benchmarks (trigger overhead, hook vs trigger)
 ├── bun/                      # Bun implementation (Bun.serve + bun:sqlite)
 │   ├── server.ts             #   single-table, point-to-point
 │   ├── server-mesh.ts        #   full mesh (multi-peer, per-peer watermark)
@@ -158,10 +163,7 @@ hook-sync/
 ├── bench-multi-region.sh     # Multi-region benchmark, 2 hubs hub-to-hub (convergence + persistence + loop check)
 ├── bench-splitbrain.sh       # Split-brain safety test (partition, conflict, reconnect)
 ├── bench-stress.sh           # Volume stress test, 10K/100K/500K items (convergence + persistence + consistency)
-├── bench-all.sh             # Run ALL benchmarks in one command (all topologies, all runtimes)
-├── hook-sync-go              # Go binary (point-to-point, single-table)
-├── hook-sync-mesh-go         # Go binary (full mesh, multi-peer)
-├── hook-sync-hub             # Go binary (dedicated hub, Pebble KV)
+├── bench-all.sh              # Run ALL benchmarks in one command (all topologies, all runtimes)
 └── BENCHMARK-REPORT.md       # Full benchmark report
 ```
 
@@ -177,9 +179,8 @@ All implementations use the same capture mechanism (triggers + `_changes` table)
 
 ### Go
 
-```bash
 cd go
-go build -o ../hook-sync-go .
+go build -o ../hook-sync-go ./cmd/server
 
 ./hook-sync-go -id node1 -db node1.db -listen :9001 -peer http://localhost:9002 -batch-ms 50 -batch-size 10000
 ```
@@ -216,7 +217,7 @@ Full mesh topology: every node ships changes to all other nodes directly. Uses p
 
 ```bash
 # Go — build mesh binary
-cd go && go build -o ../hook-sync-mesh-go ./mesh
+cd go && go build -o ../hook-sync-mesh-go ./cmd/mesh
 
 # 4-node full mesh (repeat --peer for each neighbor)
 ./hook-sync-mesh-go -id nodeA -db a.db -listen :9001 \
@@ -249,7 +250,7 @@ Edge nodes use the existing `server-mesh.*` scripts — hub is just a peer via `
 
 ```bash
 # Build hub binary
-cd go && go build -o ../hook-sync-hub ./hub
+cd go && go build -o ../hook-sync-hub ./cmd/hub
 
 # Hub (1 process, Go-only)
 ./hook-sync-hub -id hub1 -listen :9010 -db hub1.pebble \
@@ -466,11 +467,11 @@ The protocol is language-agnostic. Read [PROTOCOL.md](PROTOCOL.md) — it's ~300
 
 No consensus. No Raft. No coordinator. Just triggers + HTTP + ACK.
 
-Reference implementations: `go/main.go` (~300 lines), `bun/server.ts` (~200 lines), `node/server.js` (~200 lines). All three sync to each other.
+Reference implementations: `go/cmd/server/main.go` (~300 lines), `bun/server.ts` (~200 lines), `node/server.js` (~200 lines). All three sync to each other.
 
 ## Limitations
 
-- **Multi-table requires manual setup** — adding a table means writing triggers + updating applyChanges dispatch (see `go/multitable/`, `bun/server-multitable.ts`, `node/server-multitable.js` for 2-table example)
+- **Multi-table requires manual setup** — adding a table means writing triggers + updating applyChanges dispatch (see `go/cmd/multitable/`, `bun/server-multitable.ts`, `node/server-multitable.js` for 2-table example)
 - **Localhost benchmark variance** — HTTP throughput varies 3-8x on localhost; use real network for reliable comparison
 - **Last-write-wins, not CRDT** — split-brain conflicts resolve by timestamp. Older update is silently dropped. Fine for append-heavy workloads; for collaborative editing of shared rows, use cr-sqlite
 

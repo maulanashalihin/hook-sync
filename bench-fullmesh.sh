@@ -139,7 +139,7 @@ console.log('  All QPS: ' + qps.join(', '));
 
 # Build Go mesh binary first
 echo "Building Go mesh..."
-cd "$ROOT/go" && go build -o "$ROOT/hook-sync-mesh-go" ./mesh 2>&1
+cd "$ROOT/go" && go build -o "$ROOT/hook-sync-mesh-go" ./cmd/mesh 2>&1
 cd "$ROOT"
 echo
 

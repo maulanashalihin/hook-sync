@@ -167,7 +167,7 @@ echo ""
 
 # Build
 echo "Building..."
-cd "$ROOT/go" && go build -o "$ROOT/hook-sync-mesh-go" ./mesh && go build -o "$ROOT/hook-sync-hub" ./hub 2>&1
+cd "$ROOT/go" && go build -o "$ROOT/hook-sync-mesh-go" ./cmd/mesh && go build -o "$ROOT/hook-sync-hub" ./cmd/hub 2>&1
 cd "$ROOT"
 echo ""
 

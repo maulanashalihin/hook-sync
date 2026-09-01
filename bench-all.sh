@@ -32,9 +32,9 @@ run_bench() {
 # Build all Go binaries first
 echo "Building Go binaries..."
 cd "$ROOT/go"
-go build -o "$ROOT/hook-sync-go" . 2>&1
-go build -o "$ROOT/hook-sync-mesh-go" ./mesh 2>&1
-go build -o "$ROOT/hook-sync-hub" ./hub 2>&1
+go build -o "$ROOT/hook-sync-go" ./cmd/server 2>&1
+go build -o "$ROOT/hook-sync-mesh-go" ./cmd/mesh 2>&1
+go build -o "$ROOT/hook-sync-hub" ./cmd/hub 2>&1
 cd "$ROOT"
 echo "Build complete."
 echo

@@ -257,4 +257,4 @@ The protocol is language-agnostic. To add a new runtime:
 
 That's it. No consensus algorithm, no Raft, no coordinator. Just triggers + HTTP + ACK.
 
-Reference implementations: `go/main.go` (Go), `bun/server.ts` (Bun), `node/server.js` (Node). All three are ~300 lines and sync to each other.
+Reference implementations: `go/cmd/server/main.go` (Go), `bun/server.ts` (Bun), `node/server.js` (Node). All three are ~300 lines and sync to each other.

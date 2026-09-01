@@ -111,34 +111,38 @@ Single repo, all runtimes + packages + docs + benchmarks together. Protocol chan
 ```
 hook-sync/
 ├── go/
-│   ├── go.mod                    # module github.com/<user>/hook-sync/go
-│   ├── hooksync/                 # shared core (importable)
-│   │   ├── protocol.go           # Change, SyncRequest, SyncResponse
-│   │   ├── ship.go               # batchShip, shipWithAck, retry/backoff
-│   │   ├── apply.go              # applyChanges, LWW timestamp conflict check
-│   │   └── config.go             # Config struct, peers, batch settings
-│   ├── trigger/                  # default capture (importable, no build tag)
-│   │   ├── attach.go             # Attach(db, config) — schema introspection + auto-trigger
-│   │   └── server.go             # standalone server mode (thin wrapper)
-│   ├── hook/                     # high-perf capture (importable, build tag: sqlite_preupdate_hook)
-│   │   ├── open.go               # Open(path, config) — custom driver + preupdate/commit/rollback hook
-│   │   └── server.go             # standalone server mode
-│   ├── mesh/                     # mesh topology (refactor to use shared core)
-│   ├── hub/                      # hub relay
-│   ├── hookmem/                  # in-memory capture
-│   ├── hookpebble/               # pebble capture
-│   ├── bench/                    # benchmarks
-│   └── cmd/                      # CLI entrypoints (standalone server binaries)
+│   ├── go.mod                    # module hook-sync/go
+│   ├── cmd/                      # binary entrypoints (deployable, not importable)
+│   │   ├── server/main.go        #   standalone server (single-table, point-to-point)
+│   │   ├── mesh/main.go          #   full mesh (multi-peer, per-peer watermark)
+│   │   ├── hub/main.go           #   dedicated hub (pure relay, Pebble KV, no client requests)
+│   │   └── multitable/main.go    #   multi-table (items + categories)
+│   ├── hookmem/                  # experimental: preupdate_hook + in-memory (no persistence)
+│   ├── hookpebble/               # experimental: preupdate_hook + Pebble (same-txn safe)
+│   ├── bench/                    # direct SQLite benchmarks (trigger overhead, hook vs trigger)
+│   ├── hooksync/                 # PLANNED: shared core (importable — Phase 1)
+│   ├── trigger/                  # PLANNED: trigger capture (importable — Phase 1)
+│   └── hook/                     # PLANNED: hook capture (importable — Phase 1)
 │
-├── js/                           # npm package (Bun + Node + browser, unified)
-│   ├── package.json              # name: "hook-sync"
+├── bun/                          # Bun implementation (Bun.serve + bun:sqlite)
+│   ├── server.ts                 #   single-table, point-to-point
+│   ├── server-mesh.ts            #   full mesh
+│   └── server-multitable.ts      #   multi-table
+│
+├── node/                         # Node.js implementation (hyper-express + better-sqlite3)
+│   ├── server.js                 #   single-table, point-to-point
+│   ├── server-mesh.js            #   full mesh
+│   └── server-multitable.js      #   multi-table
+│
+├── js/                           # PLANNED: unified npm package (Bun + Node + browser — Phase 1)
+│   ├── package.json              #   name: "hook-sync"
 │   ├── src/
-│   │   ├── protocol.ts           # shared core
+│   │   ├── protocol.ts           #   shared core
 │   │   ├── ship.ts
 │   │   ├── apply.ts
-│   │   ├── trigger.ts            # trigger capture
-│   │   └── server.ts             # standalone server
-│   └── browser/                  # WASM client SDK (Phase 2)
+│   │   ├── trigger.ts            #   trigger capture
+│   │   └── server.ts             #   standalone server
+│   └── browser/                  #   WASM client SDK (Phase 2)
 │
 ├── PROTOCOL.md                   # wire protocol spec
 ├── TOPOLOGY.md                   # topology recommendations

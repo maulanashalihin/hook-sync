@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # bench-hookpebble-vs-trigger.sh
 #
-# Compares replication throughput: trigger-based (go/main.go) vs hook+Pebble (go/cmd/hookpebble)
+# Compares replication throughput: trigger-based (go/cmd/server) vs hook+Pebble (go/hookpebble)
 # 2 nodes each, 100K writes via batch endpoint, measure write QPS + convergence time + integrity
 #
 # Usage: bash bench-hookpebble-vs-trigger.sh
@@ -119,8 +119,8 @@ console.log('  Converge: min='+convergeTimes[0]+'s med='+convergeTimes[Math.floo
 }
 
 # Build both binaries
-echo "Building trigger server (go/main.go)..."
-cd "$ROOT/go" && go build -o "$ROOT/hook-sync-go" . 2>&1
+echo "Building trigger server (go/cmd/server)..."
+cd "$ROOT/go" && go build -o "$ROOT/hook-sync-go" ./cmd/server 2>&1
 echo "Building hookmem server (go/hookmem, in-memory)..."
 cd "$ROOT/go" && go build -tags sqlite_preupdate_hook -o "$ROOT/hook-sync-hookmem" ./hookmem/ 2>&1
 echo "Building hookpebble server (go/hookpebble, preupdate_hook + commit_hook + Pebble)..."
@@ -135,7 +135,7 @@ echo "############################################"
 echo
 
 # 1. Trigger-based (production)
-run_bench "TRIGGER (go/main.go, _changes + SQL triggers)" "$ROOT/hook-sync-go" ""
+run_bench "TRIGGER (go/cmd/server, _changes + SQL triggers)" "$ROOT/hook-sync-go" ""
 
 # 2. Hook+Pebble (new protocol)
 run_bench "HOOK+PEBBLE (go/cmd/hookpebble, preupdate_hook + commit_hook + Pebble)" "$ROOT/hook-sync-hookpebble" ""

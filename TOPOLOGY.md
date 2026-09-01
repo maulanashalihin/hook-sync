@@ -12,7 +12,7 @@ Each node has one `--peer` URL. Both nodes ship and receive from each other.
 Node A ←→ Node B
 ```
 
-Tested and verified across all runtime pairs (Go, Bun, Node). Files: `go/main.go`, `bun/server.ts`, `node/server.js`.
+Tested and verified across all runtime pairs (Go, Bun, Node). Files: `go/cmd/server/main.go`, `bun/server.ts`, `node/server.js`.
 
 ### Full mesh (3-7 nodes)
 
@@ -24,7 +24,7 @@ Every node ships changes to all peers directly. Repeated `--peer` flag. Per-peer
     C ←→ D
 ```
 
-Tested and verified: 4-node all-to-all, all 3 runtimes, cross-runtime mesh (Go+Bun+Node+Go). Files: `go/mesh/main.go`, `bun/server-mesh.ts`, `node/server-mesh.js`. Benchmark: `bash bench-fullmesh.sh`.
+Tested and verified: 4-node all-to-all, all 3 runtimes, cross-runtime mesh (Go+Bun+Node+Go). Files: `go/cmd/mesh/main.go`, `bun/server-mesh.ts`, `node/server-mesh.js`. Benchmark: `bash bench-fullmesh.sh`.
 
 ### Dedicated hub / star (8+ nodes)
 
@@ -37,7 +37,7 @@ Dedicated hub is a **protocol-level relay** — speaks only HTTP + JSON, languag
                         └ apply to Pebble (backup)
 ```
 
-Tested and verified: Go hub + 3 Go edges (multi-writer converge), hub crash recovery (Pebble replay), cross-runtime star (Go hub + Go/Bun/Node edges). File: `go/hub/main.go`. Binary: `hook-sync-hub`. Benchmark: `bash bench-hub.sh`.
+Tested and verified: Go hub + 3 Go edges (multi-writer converge), hub crash recovery (Pebble replay), cross-runtime star (Go hub + Go/Bun/Node edges). File: `go/cmd/hub/main.go`. Binary: `hook-sync-hub`. Benchmark: `bash bench-hub.sh`.
 
 ## Full Mesh Scaling Limits
 
@@ -112,7 +112,7 @@ A dedicated hub has **no triggers at all**. All data enters via `/sync`, not loc
 4. **ACK edge immediately** — edge deletes from its `_changes`
 5. **Forward asynchronously** — try immediate forward, background sweep retries with backoff
 
-All steps implemented in `go/hub/main.go`. Pebble chosen over bbolt/BadgerDB: LSM tree = write-optimized (hub workload is ~100% write ingest, no client reads).
+All steps implemented in `go/cmd/hub/main.go`. Pebble chosen over bbolt/BadgerDB: LSM tree = write-optimized (hub workload is ~100% write ingest, no client reads).
 
 ### Hub failure
 
@@ -205,8 +205,8 @@ Tested: `bash bench-multi-region.sh` — 5/5 PASS (cross-region convergence, bid
 
 ## Implementation Priority
 
-1. ~~**Multi-peer support** (`--peer` repeated flag)~~ ✅ **Done** — full mesh built and verified across all 3 runtimes. Per-peer watermark in `_peer_state` table. Files: `go/mesh/`, `bun/server-mesh.ts`, `node/server-mesh.js`.
-2. ~~**Relay mode**~~ ✅ **Done** — dedicated hub built with Pebble KV. Go-only (`go/hub/main.go`). Durable forwarding queue, crash recovery verified. Edges use existing `server-mesh.*` scripts.
+1. ~~**Multi-peer support** (`--peer` repeated flag)~~ ✅ **Done** — full mesh built and verified across all 3 runtimes. Per-peer watermark in `_peer_state` table. Files: `go/cmd/mesh/`, `bun/server-mesh.ts`, `node/server-mesh.js`.
+2. ~~**Relay mode**~~ ✅ **Done** — dedicated hub built with Pebble KV. Go-only (`go/cmd/hub/main.go`). Durable forwarding queue, crash recovery verified. Edges use existing `server-mesh.*` scripts.
 3. **Watermark-based pull** — nodes ask "give me changes after X" instead of push. For unreliable networks / eventual consistency at scale. Highest complexity, defer until needed.
 
 ## Solved Problems
@@ -228,7 +228,7 @@ Implemented in all 3 runtimes. Verified: 4-node mesh, 5/5 integrity PASS, 1000 i
 
 **Solved with Pebble KV store.** Hub ACKs edge immediately, then forwards asynchronously. If hub crashes after ACK but before forward, the forwarding entry (`fwd:{n}`) survives in Pebble → replay on restart. No data loss.
 
-Implemented in `go/hub/main.go`. Verified: kill hub mid-traffic → write 5 items → restart → all edges converge, 0 pending, 0 dead letter.
+Implemented in `go/cmd/hub/main.go`. Verified: kill hub mid-traffic → write 5 items → restart → all edges converge, 0 pending, 0 dead letter.
 
 ### Multi-region loop prevention
 

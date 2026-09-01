@@ -308,7 +308,7 @@ run_splitbrain_test() {
 
 # Build Go binary
 echo "Building Go..."
-cd "$ROOT/go" && go build -o "$ROOT/hook-sync-go" . 2>&1
+cd "$ROOT/go" && go build -o "$ROOT/hook-sync-go" ./cmd/server 2>&1
 cd "$ROOT"
 
 echo ""

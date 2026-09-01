@@ -297,8 +297,8 @@ run_splitbrain_test() {
 }
 
 # Build all binaries
-echo "Building trigger server (go/main.go)..."
-cd "$ROOT/go" && go build -o "$ROOT/hook-sync-go" . 2>&1
+echo "Building trigger server (go/cmd/server)..."
+cd "$ROOT/go" && go build -o "$ROOT/hook-sync-go" ./cmd/server 2>&1
 echo "Building hookpebble server (go/hookpebble)..."
 cd "$ROOT/go" && go build -tags sqlite_preupdate_hook -o "$ROOT/hook-sync-hookpebble" ./hookpebble/ 2>&1
 echo "Building hookmem server (go/hookmem)..."

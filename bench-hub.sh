@@ -168,7 +168,7 @@ console.log('  All QPS: ' + qps.join(', '));
 
 # Build Go binaries first
 echo "Building Go mesh + hub..."
-cd "$ROOT/go" && go build -o "$ROOT/hook-sync-mesh-go" ./mesh 2>&1 && go build -o "$ROOT/hook-sync-hub" ./hub 2>&1
+cd "$ROOT/go" && go build -o "$ROOT/hook-sync-mesh-go" ./cmd/mesh 2>&1 && go build -o "$ROOT/hook-sync-hub" ./cmd/hub 2>&1
 cd "$ROOT"
 echo
 
