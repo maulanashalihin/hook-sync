@@ -1,0 +1,56 @@
+---
+title: hook-sync
+description: SQLite replication that just works. Multi-server, multi-writer, multi-runtime. Zero data loss.
+template: splash
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+<div style="display: flex; flex-direction: column; gap: 2rem; margin: 2rem 0;">
+
+<div style="text-align: center; padding: 3rem 1rem;">
+
+# hook-sync
+
+**SQLite replication that just works.**
+
+Multi-server. Multi-writer. Multi-runtime. Zero data loss.
+
+No consensus. No Raft. No coordinator. Just triggers, ACK, and UUID.
+
+**3.8x faster than Postgres at batch 10K.**
+
+```bash
+# Go
+go get hook-sync/go/trigger
+
+# JS (Bun + Node)
+npm install hooksync.js
+```
+
+[Get Started →](../getting-started/overview/)
+
+</div>
+
+<CardGrid stagger>
+ <Card title="Multi-Writer" icon="seti:rust">
+  All nodes accept writes independently. UUID PKs = zero conflict, no coordinator.
+ </Card>
+ <Card title="Cross-Runtime" icon="seti:javascript">
+  Go, Bun, and Node sync to each other. Same wire protocol. Mix and match.
+ </Card>
+ <Card title="Zero Write Penalty" icon="seti:docker">
+  Sync runs in background. Write speed identical with or without peers.
+ </Card>
+ <Card title="Crash Recovery" icon="seti:shell">
+  Changes survive in SQLite `_changes` table. Resume on restart. Zero data loss.
+ </Card>
+ <Card title="Split-Brain Safe" icon="seti:terraform">
+  Last-write-wins by timestamp. Both nodes always converge. 36/36 tests pass.
+ </Card>
+ <Card title="4 Topologies" icon="seti:graphql">
+  Point-to-point, full mesh, dedicated hub, multi-region. All built and verified.
+ </Card>
+</CardGrid>
+
+</div>

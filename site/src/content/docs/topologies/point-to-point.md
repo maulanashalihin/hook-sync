@@ -1,0 +1,97 @@
+---
+title: Point-to-Point
+description: Two-node active-active replication — the simplest topology.
+---
+
+# Point-to-Point
+
+Two nodes, both write, both sync. The simplest topology — one `--peer` flag each.
+
+```
+Node A ←→ Node B
+```
+
+## When to Use
+
+- Simple active-active replica (2 servers)
+- Dev/test setup
+- Read scale-out with write scale-out (both nodes accept writes)
+
+## Setup
+
+<Tabs>
+<TabItem label="Go">
+
+```bash
+# Node A
+./hook-sync-go -id node1 -db node1.db -listen :9001 \
+  -peer http://localhost:9002
+
+# Node B
+./hook-sync-go -id node2 -db node2.db -listen :9002 \
+  -peer http://localhost:9001
+```
+
+</TabItem>
+<TabItem label="Bun">
+
+```ts
+// Node A
+const mgr = attach(db, {
+  id: "node1",
+  peers: ["http://localhost:9002"],
+  batchMs: 50,
+}, ["items"]);
+
+// Node B — change port to 9002, peer to 9001
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```js
+// Node A
+const mgr = attach(db, {
+  id: "node1",
+  peers: ["http://localhost:9002"],
+  batchMs: 50,
+}, ["items"]);
+
+// Node B — change port to 9002, peer to 9001
+```
+
+</TabItem>
+</Tabs>
+
+## How It Works
+
+1. Node A writes to SQLite → trigger captures to `_changes`
+2. Background timer ships changes to Node B every 50ms
+3. Node B applies with `INSERT OR REPLACE` + timestamp check
+4. Node B returns ACK → Node A deletes from `_changes`
+5. Same flow in reverse (Node B → Node A)
+
+Both nodes accept writes independently. Conflicts resolve via last-write-wins by `updated_at` timestamp on reconnect.
+
+## Characteristics
+
+| Property | Value |
+|----------|-------|
+| Connections | 1 |
+| Hops | 1 |
+| Redundancy | None |
+| SPOF | No |
+| Write penalty | 0% (sync is background) |
+| Sync latency | Batch interval (50ms default) |
+
+## Benchmark
+
+10 runs × 100 concurrent requests per node (200 total per run):
+
+| Runtime | QPS median | QPS min | QPS max | Integrity |
+|---------|--------:|--------:|--------:|:---------:|
+| Go | 9,149 | 3,705 | 15,063 | 10/10 PASS |
+| Bun | 10,476 | 3,004 | 14,159 | 10/10 PASS |
+| Node | 8,393 | 3,458 | 10,068 | 10/10 PASS |
+
+Run with: `bash bench-dual-ack.sh`

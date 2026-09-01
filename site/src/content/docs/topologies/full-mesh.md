@@ -1,0 +1,115 @@
+---
+title: Full Mesh
+description: Multi-writer cluster with 3-7 nodes, no coordinator. Per-peer watermarks ensure convergence.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+# Full Mesh
+
+Every node ships changes to all peers directly. No coordinator, no leader. Per-peer watermark ensures changes are deleted only after all peers ACK.
+
+```
+    A ←→ B
+    ↕ ╳ ↕
+    C ←→ D
+```
+
+## When to Use
+
+- 3-7 nodes, all accepting writes
+- No single point of failure
+- LAN or low-latency WAN
+
+## Setup
+
+<Tabs>
+<TabItem label="Go">
+
+```bash
+./hook-sync-mesh-go -id nodeA -db a.db -listen :9001 \
+  -peer http://localhost:9002 \
+  -peer http://localhost:9003 \
+  -peer http://localhost:9004
+```
+
+</TabItem>
+<TabItem label="Bun / Node">
+
+```ts
+const mgr = attach(db, {
+  id: "nodeA",
+  peers: [
+    "http://localhost:9002",
+    "http://localhost:9003",
+    "http://localhost:9004",
+  ],
+  batchMs: 50,
+}, ["items"]);
+```
+
+</TabItem>
+</Tabs>
+
+## Per-Peer Watermark
+
+Each peer has its own `last_acked` entry in the `_peer_state` table:
+
+```sql
+CREATE TABLE _peer_state (
+    peer_url TEXT PRIMARY KEY,
+    last_acked INTEGER DEFAULT 0
+);
+```
+
+- Ship only sends changes with `change_id > peer's last_acked`
+- Delete from `_changes` only when **ALL** peers have ACKed (`min(last_acked)`)
+- Offline peers' changes accumulate until they reconnect — no data loss, no dead-letter
+
+## Why Full Mesh Works
+
+`INSERT OR REPLACE` with UUID PK is idempotent. If A ships to B and C, and B also ships to C, C receives the same change twice — safe, no duplicates. The `syncing` flag is not a problem because each node receives changes directly from the writer, not through intermediaries.
+
+## Scaling Limits
+
+The bottleneck is not connection count, but **messages per second each node must handle**:
+
+```
+msgs/sec per node = (N - 1) × writes/sec per node
+```
+
+Each message ≈ 200 bytes JSON. Example with 1000 writes/sec per node:
+
+| Nodes | Msgs/sec per node | Bandwidth/node | Verdict |
+|-------|-------------------|---------------|---------|
+| 2 | 1,000 | 0.2 MB/s | Fine |
+| 5 | 4,000 | 0.8 MB/s | Fine |
+| 8 | 7,000 | 1.4 MB/s | Fine for LAN |
+| 15 | 14,000 | 2.8 MB/s | Pushing SQLite ingest |
+| 20 | 19,000 | 3.8 MB/s | Too much |
+
+<Aside type="tip" title="When to switch to hub">
+Switch to [dedicated hub](../hub/) when `(N-1) × writes/sec` exceeds ~10,000 per node. That's where SQLite WAL write contention starts to degrade.
+</Aside>
+
+**Cutoff depends on write rate, not node count alone:**
+
+| Write rate per node | Full mesh OK up to | Bottleneck |
+|--------------------|--------------------|------------|
+| 100 writes/sec | 15-20 nodes | HTTP overhead negligible |
+| 1,000 writes/sec | 8-12 nodes | SQLite ingest ~10K msg/sec |
+| 10,000 writes/sec | 3-5 nodes | SQLite can't keep up |
+
+## Benchmark
+
+4 nodes, each ships to all 3 peers concurrently. 5 runs × 50 req per node (200 total per run):
+
+| Runtime | QPS median | QPS min | QPS max | Integrity |
+|---------|--------:|--------:|--------:|:---------:|
+| Go | 14,853 | 6,108 | 23,570 | 5/5 PASS |
+| Node | 14,414 | 3,165 | 18,487 | 5/5 PASS |
+| Bun | 13,175 | 1,872 | 18,887 | 5/5 PASS |
+
+Cross-runtime mesh (Go+Bun+Node+Go) also verified — all nodes converge.
+
+Run with: `bash bench-fullmesh.sh`
