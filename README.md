@@ -349,7 +349,7 @@ Benchmark: `bash bench-fullmesh.sh` — 4 nodes, all-to-all, all 3 runtimes.
 
 Dedicated hub for star topology. Hub is **Go-only** (Pebble KV store, write-optimized LSM). No SQLite, no triggers, no `/api/items` — pure relay + backup. All data enters via `/sync`. Pebble stores backup (`data:{id}`) and durable forwarding queue (`fwd:{n}`). Hub ACKs edge immediately, forwards to other edges asynchronously. If hub crashes after ACK, forwarding queue survives in Pebble → replay on restart.
 
-Edge nodes use the existing `server-mesh.*` scripts — hub is just a peer via `--peer http://localhost:9010`. No edge script changes needed.
+Edge nodes use the existing `server-mesh.*` scripts or the `hooksync.js` library — hub is just a peer URL. No edge code changes needed.
 
 ```bash
 # Build hub binary
@@ -367,6 +367,22 @@ cd go && go build -o ../hook-sync-hub ./cmd/hub
 bun run bun/server-mesh.ts --id edge2 --db e2.db --listen :9002 --peer http://localhost:9010 --batch-ms 50
 node node/server-mesh.js --id edge3 --db e3.db --listen :9003 --peer http://localhost:9010 --batch-ms 50
 ```
+
+### Using hooksync.js library as edge with hub
+
+If you're using the npm library directly (not the wrapper scripts), just point `peers` to the hub URL:
+
+```ts
+import { attach } from "hooksync.js";
+
+const mgr = attach(db, {
+  id: "edge1",
+  peers: ["http://localhost:9010"],  // hub URL — same as any peer
+  batchMs: 50,
+}, ["items"]);
+```
+
+The hub is transparent to the edge — it's just a peer that happens to relay to other edges. See [TOPOLOGY.md](TOPOLOGY.md) for scaling formulas and multi-region setup.
 
 ## API
 

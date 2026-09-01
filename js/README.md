@@ -129,6 +129,61 @@ const mgr = attach(db, {
 
 Each peer has its own watermark (`_peer_state` table). Changes are deleted from `_changes` only after **all** peers have ACKed. Offline peers' changes accumulate until they reconnect.
 
+## Hub Topology (Star, 8+ Nodes)
+
+For 8+ nodes, full mesh generates too much traffic per node. Use a **dedicated hub** — a Go-only relay binary that forwards changes between edges. The hub is not part of this library; it's a separate process you run alongside your edge nodes.
+
+```
+edge1 ──POST /sync──→ hub ──POST /sync──→ edge2
+edge3 ──POST /sync──→ hub ──POST /sync──→ edge4
+```
+
+### 1. Run the hub (Go binary, separate process)
+
+```bash
+# Build from the hook-sync repo
+cd go && go build -o ../hook-sync-hub ./cmd/hub
+
+./hook-sync-hub -id hub1 -listen :9010 -db hub1.pebble \
+  -edge http://localhost:9001 \
+  -edge http://localhost:9002 \
+  -edge http://localhost:9003
+```
+
+The hub is a pure relay — no SQLite, no triggers, no `/api/items`. It stores a backup in Pebble KV and forwards changes to all edges. If the hub crashes, its durable forwarding queue survives and replays on restart.
+
+### 2. Point your edge nodes to the hub
+
+From the JS library's perspective, the hub is just a peer URL. No API changes:
+
+```ts
+const mgr = attach(db, {
+  id: "edge1",
+  peers: ["http://localhost:9010"],  // hub URL — same as any peer
+  batchMs: 50,
+}, ["items"]);
+```
+
+That's it. The edge ships changes to the hub, the hub ACKs immediately, then forwards to all other edges asynchronously. Edges don't know it's a hub — it's transparent.
+
+### Multi-region (hub-to-hub)
+
+For cross-region sync, run two hubs and peer them via `-edge` flag + `-url` flag (loop prevention):
+
+```bash
+# Region 1 hub
+./hook-sync-hub -id hubA -listen :9100 -url http://localhost:9100 -db hubA.pebble \
+  -edge http://localhost:9101 \
+  -edge http://localhost:9200  # hub B (peer hub)
+
+# Region 2 hub
+./hook-sync-hub -id hubB -listen :9200 -url http://localhost:9200 -db hubB.pebble \
+  -edge http://localhost:9201 \
+  -edge http://localhost:9100  # hub A (peer hub)
+```
+
+Edges in each region point to their local hub only. Hubs relay cross-region via `X-Node-Url` header (prevents infinite loops). See [TOPOLOGY.md](https://github.com/maulanashalihin/hook-sync/blob/main/TOPOLOGY.md) for full details.
+
 ## SQLite Binding Compatibility
 
 The library accepts a minimal `SqliteDatabase` interface — it never imports a binding:
