@@ -131,13 +131,14 @@ Ship failures retry with exponential backoff (50/100/200/400/800ms, 5 attempts).
 
 Multi-writer without UUID = data loss. Integer auto-increment collides across nodes (both get rowid 1, 2, 3 → `INSERT OR REPLACE` overwrites silently). UUID gives every node independent IDs — no coordinator, no collision, no CRDT.
 
-Any UUID version works — v4 or v7, pick what's fastest in your runtime:
+UUIDv7 is recommended — time-ordered IDs give sequential B-tree inserts, which is the primary workload for hook-sync. UUIDv4 works too if your runtime lacks a fast v7 implementation.
 
-| Language | Preferred | Why |
-|----------|-----------|-----|
-| Go | UUIDv7 | Time-ordered → sequential B-tree insert (benchmark: `go/bench/bench_uuid.go`) |
-| Bun | UUIDv4 or v7 | v4: `crypto.randomUUID()` native (fastest generation). v7: optimized hex-table impl wins on sequential insert via B-tree locality (benchmark: `bun/bench-uuid.ts`) |
-| Node | UUIDv4 | `crypto.randomUUID()` native. Node 26+ will have `crypto.randomUUIDv7()` native (PR [#62553](https://github.com/nodejs/node/pull/62553)) |
+| Language | Recommended | Why |
+|----------|-------------|-----|
+| Go | UUIDv7 | `uuid.NewV7()` — time-ordered → sequential B-tree insert (benchmark: `go/bench/bench_uuid.go`) |
+| Bun | UUIDv7 | Optimized hex-table impl — 1.2-1.5x faster than v4 on sequential insert despite slower generation (benchmark: `bun/bench-uuid.ts`) |
+| Node | UUIDv7 | Use optimized hex-table impl. Node 26+ will have `crypto.randomUUIDv7()` native ([PR #62553](https://github.com/nodejs/node/pull/62553)) |
+| Any | UUIDv4 (fallback) | `crypto.randomUUID()` native — fastest generation, but random insert order causes B-tree page splits at scale |
 
 ## Architecture
 
