@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # bench-hookpebble-vs-trigger.sh
 #
-# Compares replication throughput: trigger-based (go/cmd/server) vs hook+Pebble (go/hookpebble)
+# Compares replication throughput: trigger/ library (go/cmd/server) vs hook/ library (go/cmd/hookserver)
 # 2 nodes each, 100K writes via batch endpoint, measure write QPS + convergence time + integrity
+# hook/ runs in two modes: Pebble-backed (default) and in-memory (--in-memory flag)
 #
 # Usage: bash bench-hookpebble-vs-trigger.sh
 
@@ -17,7 +18,7 @@ ITEMS=100000
 
 cleanup() {
 	pkill -9 -f "hook-sync-go.*1910" 2>/dev/null || true
-	pkill -9 -f "hook-sync-hookpebble.*1910" 2>/dev/null || true
+	pkill -9 -f "hook-sync-hookserver.*1910" 2>/dev/null || true
 	sleep 1
 	rm -f "$ROOT"/hp-bench-*.db "$ROOT"/hp-bench-*.db-wal "$ROOT"/hp-bench-*.db-shm 2>/dev/null || true
 	rm -rf "$ROOT"/hp-bench-*.pebble 2>/dev/null || true
@@ -119,29 +120,27 @@ console.log('  Converge: min='+convergeTimes[0]+'s med='+convergeTimes[Math.floo
 }
 
 # Build both binaries
-echo "Building trigger server (go/cmd/server)..."
+echo "Building trigger server (go/cmd/server, trigger/ library)..."
 cd "$ROOT/go" && go build -o "$ROOT/hook-sync-go" ./cmd/server 2>&1
-echo "Building hookmem server (go/hookmem, in-memory)..."
-cd "$ROOT/go" && go build -tags sqlite_preupdate_hook -o "$ROOT/hook-sync-hookmem" ./hookmem/ 2>&1
-echo "Building hookpebble server (go/hookpebble, preupdate_hook + commit_hook + Pebble)..."
-cd "$ROOT/go" && go build -tags sqlite_preupdate_hook -o "$ROOT/hook-sync-hookpebble" ./hookpebble/ 2>&1
+echo "Building hook server (go/cmd/hookserver, hook/ library — Pebble + in-memory)..."
+cd "$ROOT/go" && go build -tags sqlite_preupdate_hook -o "$ROOT/hook-sync-hookserver" ./cmd/hookserver 2>&1
 cd "$ROOT"
 echo
 
 echo "############################################"
-echo "# hookpebble vs trigger replication benchmark"
+echo "# hook/ vs trigger/ library replication benchmark"
 echo "# ${RUNS} runs × ${ITEMS} batch writes, 2-node replication"
 echo "############################################"
 echo
 
-# 1. Trigger-based (production)
-run_bench "TRIGGER (go/cmd/server, _changes + SQL triggers)" "$ROOT/hook-sync-go" ""
+# 1. Trigger-based (trigger/ library)
+run_bench "TRIGGER (go/cmd/server, trigger/ library — _changes + SQL triggers)" "$ROOT/hook-sync-go" ""
 
-# 2. Hook+Pebble (new protocol)
-run_bench "HOOK+PEBBLE (go/cmd/hookpebble, preupdate_hook + commit_hook + Pebble)" "$ROOT/hook-sync-hookpebble" ""
+# 2. Hook+Pebble (hook/ library, Pebble-backed)
+run_bench "HOOK+PEBBLE (go/cmd/hookserver, hook/ library — preupdate_hook + commit_hook + Pebble)" "$ROOT/hook-sync-hookserver" ""
 
-# 3. Hook+Memory (no Pebble, no persistence)
-run_bench "HOOK+MEMORY (go/hookmem, preupdate_hook + in-memory slice)" "$ROOT/hook-sync-hookmem" ""
+# 3. Hook+Memory (hook/ library, in-memory, no persistence)
+run_bench "HOOK+MEMORY (go/cmd/hookserver -in-memory, hook/ library — preupdate_hook + in-memory slice)" "$ROOT/hook-sync-hookserver" "-in-memory"
 
 echo "############################################"
 echo "# Done — compare QPS + convergence"
