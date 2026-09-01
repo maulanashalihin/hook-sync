@@ -1,6 +1,6 @@
 # hook-sync Roadmap
 
-> Product vision, gap analysis, and direction. Last updated: 2026-09-01 (Phase 1 complete).
+> Product vision, gap analysis, and direction. Last updated: 2026-09-01 (Phase 1 complete, Phase 3 + Phase 5 closed — research/analysis concluded neither WS transport nor CDC platform is worth pursuing for node-to-node).
 
 ## Current State
 
@@ -43,10 +43,10 @@ hook-sync is a working SQLite replication engine: trigger capture → `_changes`
 | No auth/TLS — sync protocol is plain HTTP | Not production-safe on public network | Ops/infra teams |
 | No observability — only `/health` JSON | No dashboard, no metrics, no alerting | Ops teams |
 | No schema evolution — triggers hardcoded per table | Add column = manual trigger update | All developers |
-| No real-time subscriptions — client must poll | No WebSocket/SSE for live updates | Real-time apps |
+| ~~No real-time subscriptions — client must poll~~ ✅ Closed (Phase 3) | ~~No WebSocket/SSE for live updates~~ Research: HTTP = WS at same interval for node-to-node. Sync delay is batch-interval-bound, not transport-bound. `batchMs: 1` gives 1ms delay with HTTP. WS/SSE deferred to client SDK (Phase 2/6) where server-push is genuinely needed. See `RESEARCH-PHASE3-HTTP-VS-WS.md` | Real-time apps |
 | No mobile/browser SDK — protocol exists, no client library | Can't use in local-first apps | Mobile/web developers |
 | Hub = SPOF — manual hub-backup only | No automatic failover | Ops teams |
-| No CDC routing — changes only sync to peers | Can't route to Kafka/S3/webhook | Data engineering |
+| ~~No CDC routing — changes only sync to peers~~ ✅ Closed (Phase 5) | ~~Can't route to Kafka/S3/webhook~~ Analysis: full CDC = different product category (Debezium, Kafka Connect). SQLite users don't build Kafka pipelines. Most use cases better served by peer sync (consumer needs data → make it a peer). Webhook = no proven demand. Moved to Ideas Not Pursued. | Data engineering |
 
 ## Product Direction
 
@@ -264,16 +264,30 @@ Browser (WASM SQLite)          Server (hook-sync)
 4. Multiple devices → all converge, LWW conflict resolution
 5. Zero backend code — deploy hook-sync Server, build app, sync works
 
-### Phase 3: Real-time Transport
+### Phase 3: Real-time Transport ✅ Closed (researched, not implemented)
 
-Add WebSocket/SSE alongside HTTP polling for real-time sync.
+**Decision:** HTTP remains the sole transport for node-to-node sync. WebSocket adds complexity for zero benefit in the core engine.
 
-**Deliverables:**
+**Research:** `RESEARCH-PHASE3-HTTP-VS-WS.md` — 14-variant benchmark (HTTP vs WS at 1/5/10/50ms intervals + event-driven flush every 1/10/100 writes).
 
-- [ ] WebSocket transport option (in addition to HTTP batch)
-- [ ] Server-push: peer gets notified instantly on change, not waiting for next batch tick
-- [ ] Fallback to HTTP polling for environments without WebSocket
-- [ ] Subscription API: client subscribes to table/row changes
+**Findings:**
+
+- HTTP and WS are statistically identical at the same batch interval (9,819 vs 9,747 QPS at 1ms, 6,296 vs 5,815 at 50ms). Sync delay = batch interval, not transport.
+- Event-driven (ship every N writes): HTTP wins 2.1x at flush=1, 1.1x at flush=10, ties at flush=100. WS ack-resolver pattern has higher per-batch overhead than HTTP fetch.
+- HTTP wins 10/12 operational categories: stateless, proxy-friendly, restart-resilient, universal `fetch()`, no connection management, mesh = 0 persistent connections.
+- WS only wins for client-facing (browser/mobile server-push) — that belongs in client SDK (Phase 2/6), not core engine.
+
+**What replaces WS for real-time:**
+
+- `batchMs: 1` — already supported, gives 1ms sync delay with HTTP.
+- Event-driven ship trigger — optional post-commit callback that ships immediately. `hook/` library already does this via `commit_hook`.
+
+**Deliverables (closed — not pursued):**
+
+- [x] ~~WebSocket transport option~~ — researched, not implemented. HTTP sufficient.
+- [x] ~~Server-push~~ — solved by lowering `batchMs` or event-driven ship trigger.
+- [x] ~~Fallback to HTTP polling~~ — HTTP is the only transport, no fallback needed.
+- [ ] Subscription API (table/row changes) — deferred to Phase 2 client SDK (SSE/WS in client layer, not core engine).
 
 ### Phase 4: hook-sync Studio (Dashboard)
 
@@ -288,28 +302,26 @@ Web UI for managing hook-sync clusters.
 - [ ] Node add/remove from UI
 - [ ] Alerting (sync lag > threshold, dead letter > 0, node down)
 
-### Phase 5: hook-sync CDC (Change Data Capture)
+### Phase 5: hook-sync CDC (Change Data Capture) ✅ Closed (analyzed, not implemented)
 
-Route changes to multiple sinks beyond peer sync.
+**Decision:** Full CDC platform moved to Ideas Not Pursued. No proven demand. Different product category.
 
-```
-SQLite write
-  → Trigger captures to _changes
-  → Router dispatches to:
-      ├── Peer sync (current — HTTP to other hook-sync nodes)
-      ├── Webhook (notify external systems)
-      ├── Kafka/NATS/SQS (event streaming)
-      ├── S3/GCS (backup/archive)
-      └── Elasticsearch/Meilisearch (search index)
-```
+**Analysis:**
 
-**Deliverables:**
+- `_changes` table is already a CDC log — data is there. The question is whether routing to external sinks is hook-sync's job.
+- Full CDC (Kafka/S3/Elasticsearch) = different product category. Debezium, Kafka Connect, Airbyte do this better. SQLite users don't build Kafka pipelines — they chose SQLite for simplicity.
+- Each sink has different delivery semantics (ordering, retention, backpressure, retry). Not "one interface, many sinks" — 4 separate products.
+- `_changes` is deleted after peer ACK — no replay capability. CDC needs durable event log with multi-consumer retention = different data model.
+- Webhook sink: no proven demand. Consumer needs data? Make it a peer (already built). Consumer needs event only? Niche (Slack/Zapier integration plumbing, not core sync).
+- Distracts from differentiating features (Phase 2 browser SDK, Phase 6 mobile SDK) that make hook-sync unique.
 
-- [ ] Sink interface (pluggable, same change format)
-- [ ] Webhook sink (simplest, first)
-- [ ] Kafka/NATS sink
-- [ ] S3 batch sink
-- [ ] At-least-once delivery guarantee (ACK-based, same as peer sync)
+**Deliverables (closed — not pursued):**
+
+- [x] ~~Sink interface (pluggable)~~ — overengineering for zero proven sinks
+- [x] ~~Webhook sink~~ — no proven demand. Revisit if users request.
+- [x] ~~Kafka/NATS sink~~ — scope creep. Use Debezium/Kafka Connect.
+- [x] ~~S3 batch sink~~ — backup = Litestream's job.
+- [x] ~~At-least-once delivery~~ — already built in `hooksync/` core for peer sync.
 
 ### Phase 6: Mobile SDK
 
@@ -341,6 +353,8 @@ Native SQLite on mobile + hook-sync client = offline-first mobile apps.
 | Full CRDT sync | Complex, schema changes required — LWW covers most use cases |
 | Compression | Benchmarked: not worth it on fast links (CPU > bandwidth save) |
 | Watermark-based pull | Highest complexity, defer until needed (TOPOLOGY.md notes) |
+| CDC routing (Kafka/S3/Elasticsearch sinks) | Different product category (Debezium, Kafka Connect). SQLite users don't build Kafka pipelines. Each sink = different delivery semantics. No proven demand. Consumer needs data → make it a peer. |
+| Webhook sink | No proven demand. Consumer needs data → peer sync (already built). Consumer needs event only → niche integration plumbing. Revisit if users request. |
 
 ## Decision Log
 
@@ -348,3 +362,5 @@ Native SQLite on mobile + hook-sync client = offline-first mobile apps.
 - **2026-09-01:** Dual-package capture strategy for Go library. `trigger` package (default, `Attach(db, config)`, no build tag, cross-runtime) + `hook` package (opt-in, `Open(path, config)`, `-tags sqlite_preupdate_hook`, Go-only, 89% faster). Shared `hooksync/` core (protocol, ship, ACK, LWW). User picks capture mode at import time. Both share wire protocol — trigger nodes sync to hook nodes. Bun/Node use trigger only (no CGO preupdate_hook).
 - **2026-09-01:** Monorepo. Go (`go/` with `hooksync/`, `trigger/`, `hook/`, `mesh/`, `hub/`, `cmd/`) + JS (`js/` unified Bun/Node/browser) + docs + benchmarks in 1 repo. Protocol changes = 1 commit. Shared core atomic refactors. Single release tag, single issue tracker. Split only when release cadence, contributor teams, or licensing diverge — none apply now.
 - **2026-09-01:** Phase 1 complete. Go libraries (`hooksync/`, `trigger/`, `hook/`) extracted and importable. JS library published as `hooksync.js` v0.1.3 on npm. All 4 JS wrappers (Bun single/mesh/multitable, Node single/mesh/multitable) refactored to thin wrappers over `js/` library. 36/36 split-brain tests pass. Website built with Astro Starlight, deployed to hook-sync.pages.dev. Gap "Standalone server only — not a library" resolved.
+- **2026-09-01:** Phase 3 closed. Research (`RESEARCH-PHASE3-HTTP-VS-WS.md`, 14-variant benchmark) concluded HTTP wins for node-to-node sync. HTTP and WS statistically identical at same batch interval — sync delay is interval-bound, not transport-bound. Event-driven: HTTP wins 2.1x at flush=1. HTTP wins 10/12 operational categories (stateless, proxy-friendly, restart-resilient, universal fetch). WS/SSE deferred to client SDK (Phase 2/6) where server-push is genuinely needed. Real-time latency achievable via `batchMs: 1` or event-driven ship trigger (commit_hook callback) — no WS required. Gap "No real-time subscriptions" closed for node-to-node; subscription API deferred to client SDK layer.
+- **2026-09-01:** Phase 5 closed. Full CDC (Kafka/S3/Elasticsearch/webhook sinks) moved to Ideas Not Pursued. Analysis: full CDC = different product category (Debezium, Kafka Connect). SQLite users chose SQLite for simplicity, not for building Kafka pipelines. Each sink has different delivery semantics — not "one interface, many sinks" but 4 separate products. `_changes` deleted after peer ACK = no replay capability (CDC needs durable event log). Webhook: no proven demand — consumer needs data → make it a peer (already built); consumer needs event only → niche integration plumbing. Distracts from differentiating features (browser/mobile SDK). Gap "No CDC routing" closed.
