@@ -1,6 +1,6 @@
 # hook-sync Roadmap
 
-> Product vision, gap analysis, and direction. Last updated: 2026-09-01.
+> Product vision, gap analysis, and direction. Last updated: 2026-09-01 (Phase 1 complete).
 
 ## Current State
 
@@ -28,12 +28,16 @@ hook-sync is a working SQLite replication engine: trigger capture → `_changes`
 | Split-brain safety | ✅ Done |
 | Crash recovery | ✅ Done |
 | Multi-region (hub-to-hub) | ✅ Done |
+| Go libraries (`hooksync/`, `trigger/`, `hook/`) | ✅ Done — Phase 1 |
+| JS library (`hooksync.js` on npm, v0.1.3) | ✅ Done — Phase 1 |
+| JS wrappers refactored to thin wrappers over `js/` library | ✅ Done |
+| Website ([hook-sync.pages.dev](https://hook-sync.pages.dev)) | ✅ Done |
 
 ## Gap Analysis
 
 | Gap | Impact | Who cares |
 |-----|--------|-----------|
-| Standalone server only — not a library | Every app must talk HTTP to hook-sync, can't `import { replicate }` | All developers |
+| ~~Standalone server only — not a library~~ ✅ Resolved | ~~Every app must talk HTTP to hook-sync~~ Now: `import { attach } from 'hooksync.js'` (npm) or `trigger.Attach()` (Go) | All developers |
 | LWW only — older update silently dropped | Not suitable for collaborative editing of shared rows | Collaborative apps |
 | No partial replication — all nodes get all data | Can't shard, can't filter by tenant/region | Multi-tenant, large-scale |
 | No auth/TLS — sync protocol is plain HTTP | Not production-safe on public network | Ops/infra teams |
@@ -100,7 +104,7 @@ hook-sync occupies a gap no one fills: **stock SQLite + multi-writer + local-fir
 
 ## Roadmap
 
-### Phase 1: Embedded Library (core extraction)
+### Phase 1: Embedded Library (core extraction) ✅ Done
 
 Extract standalone server into importable library. One line of code = replication.
 
@@ -120,9 +124,9 @@ hook-sync/
 │   ├── hookmem/                  # experimental: preupdate_hook + in-memory (benchmark baseline, no persistence)
 │   ├── hookpebble/               # experimental: preupdate_hook + Pebble (prototype for hook/ library — Phase 1)
 │   ├── bench/                    # direct SQLite benchmarks (trigger overhead, hook vs trigger)
-│   ├── hooksync/                 # PLANNED: shared core (importable — Phase 1)
-│   ├── trigger/                  # PLANNED: trigger capture (importable — Phase 1)
-│   └── hook/                     # PLANNED: hook capture (importable — Phase 1)
+│   ├── hooksync/                 # shared core (importable) — ✅ Phase 1 done
+│   ├── trigger/                  # trigger capture (importable) — ✅ Phase 1 done
+│   └── hook/                     # hook capture (importable) — ✅ Phase 1 done
 │
 ├── bun/                          # Bun implementation (Bun.serve + bun:sqlite)
 │   ├── server.ts                 #   single-table, point-to-point
@@ -134,26 +138,26 @@ hook-sync/
 │   ├── server-mesh.js            #   full mesh
 │   └── server-multitable.js      #   multi-table
 │
-├── js/                           # PLANNED: unified npm package (Bun + Node + browser — Phase 1)
-│   ├── package.json              #   name: "hook-sync"
+├── js/                           # unified npm package: hooksync.js (Bun + Node) — ✅ Phase 1 done
+│   ├── package.json              #   name: "hooksync.js"
 │   ├── src/
-│   │   ├── protocol.ts           #   shared core
-│   │   ├── ship.ts
-│   │   ├── apply.ts
-│   │   ├── trigger.ts            #   trigger capture
-│   │   └── server.ts             #   standalone server
-│   └── browser/                  #   WASM client SDK (Phase 2)
+│   │   ├── index.ts              #   re-exports attach(), types
+│   │   ├── types.ts              #   Change, Config, SyncRequest/Response, SqliteDatabase
+│   │   ├── apply.ts              #   table-agnostic LWW apply
+│   │   ├── ship.ts               #   shipWithAck() via fetch()
+│   │   └── trigger.ts            #   attach() → Manager (triggers, ship loop, watermarks)
+│   └── browser/                  #   WASM client SDK (Phase 2 — not started)
 │
 ├── PROTOCOL.md                   # wire protocol spec
 ├── TOPOLOGY.md                   # topology recommendations
 ├── ROADMAP.md                    # this file
 ├── README.md
+├── site/                        # Astro Starlight website (hook-sync.pages.dev)
 ├── bench-*.sh                    # benchmark scripts
 └── BENCHMARK-REPORT.md           # benchmark results
 ```
-
-**Go import:** `go get github.com/<user>/hook-sync/go/trigger`
-**npm install:** `npm install hook-sync` (published from `js/`)
+**Go import:** `go get github.com/maulanashalihin/hook-sync/go/trigger`
+**npm install:** `npm install hooksync.js` (published from `js/`)
 
 **Why monorepo (not split):** protocol changes touch library + server + bench + docs in 1 commit. Shared `hooksync/` core used by trigger + hook + server. Atomic refactors, single release tag, single issue tracker. Split only when release cadence, contributor teams, or licensing diverge — none of which apply now.
 
@@ -212,14 +216,14 @@ attachSync(db, { peers: ['http://peer:9002'], batchMs: 50 });
 
 #### Deliverables
 
-- [ ] Extract shared core: protocol types, ship loop, ACK logic, retry, LWW conflict resolution, peer watermarks → `hooksync/`
-- [ ] Extract trigger capture: schema introspection (`PRAGMA table_info`), auto-trigger SQL generation → `trigger/`
-- [ ] Extract hook capture: custom driver registration, preupdate/commit/rollback hooks, Pebble batch → `hook/`
-- [ ] `trigger.Attach(db, config)` — drop-in, works with existing `*sql.DB`
-- [ ] `hook.Open(path, config)` — custom driver, connection-level hooks
-- [ ] Auto-trigger generation from schema introspection (not hardcoded per table)
-- [ ] Ship as: Go module, npm package (Bun/Node)
-- [ ] Backward compat: standalone server mode still works (thin wrapper around library)
+- [x] Extract shared core: protocol types, ship loop, ACK logic, retry, LWW conflict resolution, peer watermarks → `hooksync/`
+- [x] Extract trigger capture: schema introspection (`PRAGMA table_info`), auto-trigger SQL generation → `trigger/`
+- [x] Extract hook capture: custom driver registration, preupdate/commit/rollback hooks, Pebble batch → `hook/`
+- [x] `trigger.Attach(db, config)` — drop-in, works with existing `*sql.DB`
+- [x] `hook.Open(path, config)` — custom driver, connection-level hooks
+- [x] Auto-trigger generation from schema introspection (not hardcoded per table)
+- [x] Ship as: Go module, npm package (`hooksync.js` v0.1.3 on npm)
+- [x] Backward compat: standalone server mode still works (thin wrapper around library)
 
 #### What's reusable from current codebase
 
@@ -343,3 +347,4 @@ Native SQLite on mobile + hook-sync client = offline-first mobile apps.
 - **2026-09-01:** Roadmap created. Direction: embedded library + local-first sync engine. Chosen over standalone-server-only because the gap (stock SQLite + multi-writer + local-first + self-hostable) is unfilled by any existing project. 80% of core already built.
 - **2026-09-01:** Dual-package capture strategy for Go library. `trigger` package (default, `Attach(db, config)`, no build tag, cross-runtime) + `hook` package (opt-in, `Open(path, config)`, `-tags sqlite_preupdate_hook`, Go-only, 89% faster). Shared `hooksync/` core (protocol, ship, ACK, LWW). User picks capture mode at import time. Both share wire protocol — trigger nodes sync to hook nodes. Bun/Node use trigger only (no CGO preupdate_hook).
 - **2026-09-01:** Monorepo. Go (`go/` with `hooksync/`, `trigger/`, `hook/`, `mesh/`, `hub/`, `cmd/`) + JS (`js/` unified Bun/Node/browser) + docs + benchmarks in 1 repo. Protocol changes = 1 commit. Shared core atomic refactors. Single release tag, single issue tracker. Split only when release cadence, contributor teams, or licensing diverge — none apply now.
+- **2026-09-01:** Phase 1 complete. Go libraries (`hooksync/`, `trigger/`, `hook/`) extracted and importable. JS library published as `hooksync.js` v0.1.3 on npm. All 4 JS wrappers (Bun single/mesh/multitable, Node single/mesh/multitable) refactored to thin wrappers over `js/` library. 36/36 split-brain tests pass. Website built with Astro Starlight, deployed to hook-sync.pages.dev. Gap "Standalone server only — not a library" resolved.
