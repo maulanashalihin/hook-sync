@@ -204,16 +204,16 @@ function uuidv7(): string {
 - **No consensus** — no Raft, no coordinator, no leader election. Just triggers + HTTP + ACK
 
 <CardGrid stagger>
-  <Card title="Point-to-Point" icon="seti:custom" href="/topologies/point-to-point/">
+  <Card title="Point-to-Point" icon="link" href="/topologies/point-to-point/">
     2 nodes, active-active. Simplest setup.
   </Card>
-  <Card title="Full Mesh" icon="seti:custom" href="/topologies/full-mesh/">
+  <Card title="Full Mesh" icon="puzzle" href="/topologies/full-mesh/">
     3-7 nodes, all-to-all sync.
   </Card>
-  <Card title="Dedicated Hub" icon="seti:custom" href="/topologies/hub/">
+  <Card title="Dedicated Hub" icon="server" href="/topologies/hub/">
     8+ nodes. Go-only relay with Pebble KV.
   </Card>
-  <Card title="Multi-Region" icon="seti:custom" href="/topologies/multi-region/">
+  <Card title="Multi-Region" icon="external" href="/topologies/multi-region/">
     Hub-to-hub cross-region sync.
   </Card>
 </CardGrid>
