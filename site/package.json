@@ -5,14 +5,15 @@
   "scripts": {
     "dev": "astro dev",
     "start": "astro dev",
-    "build": "astro build",
+    "build": "astro build && node scripts/inject-og.mjs",
     "preview": "astro preview",
     "astro": "astro",
-    "deploy": "astro build && wrangler pages deploy dist --project-name=hook-sync"
+    "deploy": "astro build && node scripts/inject-og.mjs && wrangler pages deploy dist --project-name=hook-sync"
   },
   "dependencies": {
     "@astrojs/starlight": "^0.41.10",
     "astro": "^7.1.6",
+    "astro-og-canvas": "^0.13.0",
     "sharp": "^0.35.3"
   }
 }
