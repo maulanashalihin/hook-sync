@@ -136,8 +136,8 @@ Any UUID version works — v4 or v7, pick what's fastest in your runtime:
 | Language | Preferred | Why |
 |----------|-----------|-----|
 | Go | UUIDv7 | Time-ordered → sequential B-tree insert (benchmark: `go/bench/bench_uuid.go`) |
-| Bun | UUIDv4 | `crypto.randomUUID()` native → generation is the bottleneck, not insert |
-| Node | UUIDv4 | `crypto.randomUUID()` native → same as Bun |
+| Bun | UUIDv4 or v7 | v4: `crypto.randomUUID()` native (fastest generation). v7: optimized hex-table impl wins on sequential insert via B-tree locality (benchmark: `bun/bench-uuid.ts`) |
+| Node | UUIDv4 | `crypto.randomUUID()` native. Node 26+ will have `crypto.randomUUIDv7()` native (PR [#62553](https://github.com/nodejs/node/pull/62553)) |
 
 ## Architecture
 

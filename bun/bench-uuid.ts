@@ -3,7 +3,8 @@
 
 import { Database } from "bun:sqlite";
 
-// --- UUIDv7 (time-ordered, RFC 9562) ---
+// --- UUIDv7 (time-ordered, RFC 9562) — optimized with hex lookup table ---
+const HEX = Array.from({ length: 256 }, (_, i) => i.toString(16).padStart(2, "0"));
 function uuidv7(): string {
 	const ts = Date.now();
 	const buf = new Uint8Array(16);
@@ -16,8 +17,13 @@ function uuidv7(): string {
 	buf[5] = ts & 0xff;
 	buf[6] = (buf[6] & 0x0f) | 0x70;
 	buf[8] = (buf[8] & 0x3f) | 0x80;
-	const hex = [...buf].map((b) => b.toString(16).padStart(2, "0"));
-	return `${hex.slice(0, 4).join("")}-${hex.slice(4, 6).join("")}-${hex.slice(6, 8).join("")}-${hex.slice(8, 10).join("")}-${hex.slice(10, 16).join("")}`;
+	return (
+		HEX[buf[0]] + HEX[buf[1]] + HEX[buf[2]] + HEX[buf[3]] + "-" +
+		HEX[buf[4]] + HEX[buf[5]] + "-" +
+		HEX[buf[6]] + HEX[buf[7]] + "-" +
+		HEX[buf[8]] + HEX[buf[9]] + "-" +
+		HEX[buf[10]] + HEX[buf[11]] + HEX[buf[12]] + HEX[buf[13]] + HEX[buf[14]] + HEX[buf[15]]
+	);
 }
 
 // --- UUIDv4 ---
@@ -29,13 +35,13 @@ function benchSequential(db: Database, n: number, useV7: boolean): number {
 	db.exec("DELETE FROM items");
 	const gen = useV7 ? uuidv7 : uuidv4;
 	const stmt = db.prepare(
-		"INSERT INTO items(id, name, value, created_at, updated_at, node_id) VALUES(?, ?, ?, ?, ?, ?)"
+		"INSERT INTO items(id, name, value, created_at, updated_at) VALUES(?, ?, ?, ?, ?)"
 	);
 	const start = performance.now();
 	for (let i = 0; i < n; i++) {
 		const id = gen();
 		const now = Date.now();
-		stmt.run(id, `item-${i}`, i, now, now, "bench");
+		stmt.run(id, `item-${i}`, i, now, now);
 	}
 	const elapsed = performance.now() - start;
 	return Math.round((n / elapsed) * 1000);
@@ -45,14 +51,14 @@ function benchTransaction(db: Database, n: number, useV7: boolean): number {
 	db.exec("DELETE FROM items");
 	const gen = useV7 ? uuidv7 : uuidv4;
 	const stmt = db.prepare(
-		"INSERT INTO items(id, name, value, created_at, updated_at, node_id) VALUES(?, ?, ?, ?, ?, ?)"
+		"INSERT INTO items(id, name, value, created_at, updated_at) VALUES(?, ?, ?, ?, ?)"
 	);
 	const start = performance.now();
 	db.exec("BEGIN");
 	for (let i = 0; i < n; i++) {
 		const id = gen();
 		const now = Date.now();
-		stmt.run(id, `item-${i}`, i, now, now, "bench");
+		stmt.run(id, `item-${i}`, i, now, now);
 	}
 	db.exec("COMMIT");
 	const elapsed = performance.now() - start;
@@ -76,7 +82,7 @@ db.exec("PRAGMA synchronous = NORMAL");
 db.exec(`
 	CREATE TABLE items (
 		id TEXT PRIMARY KEY, name TEXT, value INTEGER,
-		created_at INTEGER, updated_at INTEGER, node_id TEXT
+		created_at INTEGER, updated_at INTEGER
 	)
 `);
 

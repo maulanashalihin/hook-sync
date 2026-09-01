@@ -175,7 +175,7 @@ Connection errors (peer unreachable) do NOT dead-letter — changes stay in `_ch
 
 ## Primary Keys
 
-Any UUID version works (v4 or v7). Eliminates conflicts in multi-writer setups — no coordinator, no CRDT, no collision. Pick what's fastest in your runtime: Go prefers v7 (time-ordered → sequential B-tree insert), JS prefers v4 (`crypto.randomUUID()` native). Benchmark: `go/bench/bench_uuid.go`.
+Any UUID version works (v4 or v7). Eliminates conflicts in multi-writer setups — no coordinator, no CRDT, no collision. Pick what's fastest in your runtime: Go prefers v7 (time-ordered → sequential B-tree insert). JS: v4 has fastest generation (`crypto.randomUUID()` native), but an optimized v7 hex-table impl can win on sequential insert via B-tree locality. Node 26+ will have `crypto.randomUUIDv7()` native ([PR #62553](https://github.com/nodejs/node/pull/62553)). Benchmarks: `go/bench/bench_uuid.go`, `bun/bench-uuid.ts`.
 
 Every table that participates in sync MUST have:
 
