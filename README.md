@@ -155,11 +155,20 @@ hook-sync/
 │   ├── hookpebble/           #   legacy: preupdate_hook + Pebble (refactored to use hook/ library)
 │   ├── hookmem/              #   research: preupdate_hook + in-memory (no persistence, benchmark baseline only)
 │   └── bench/                #   direct SQLite benchmarks (trigger overhead, hook vs trigger)
-├── bun/                      # Bun implementation (Bun.serve + bun:sqlite)
+├── js/                       # JS/TS library (npm: hooksync.js) — shared core for Bun and Node
+│   ├── src/
+│   │   ├── index.ts          #   re-exports attach(), types
+│   │   ├── types.ts          #   Change, Config, SyncRequest/Response, SqliteDatabase interface
+│   │   ├── apply.ts          #   table-agnostic LWW apply (dynamic SQL from Change.row keys)
+│   │   ├── ship.ts           #   shipWithAck() via fetch()
+│   │   └── trigger.ts        #   attach(db, config, tables) → Manager (triggers, ship loop, watermarks)
+│   ├── package.json          #   npm package: hooksync.js
+│   └── tsconfig.json
+├── bun/                      # Bun wrapper (Bun.serve + bun:sqlite, imports js/ library)
 │   ├── server.ts             #   single-table, point-to-point
 │   ├── server-mesh.ts        #   full mesh (multi-peer, per-peer watermark)
 │   └── server-multitable.ts  #   multi-table
-├── node/                     # Node.js implementation (hyper-express + better-sqlite3)
+├── node/                     # Node.js wrapper (hyper-express + better-sqlite3, imports js/ library)
 │   ├── server.js             #   single-table, point-to-point
 │   ├── server-mesh.js        #   full mesh (multi-peer, per-peer watermark)
 │   └── server-multitable.js  #   multi-table
@@ -176,8 +185,8 @@ hook-sync/
 | Language | Capture | Binding | HTTP server |
 |----------|---------|---------|-------------|
 | Go | `trigger/` (SQL triggers) or `hook/` (preupdate_hook + Pebble, 35% faster) | mattn/go-sqlite3 | Fiber (fasthttp) |
-| Bun | SQLite triggers + `_changes` | bun:sqlite (built-in) | Bun.serve (native) |
-| Node | SQLite triggers + `_changes` | better-sqlite3 | hyper-express (uWebSockets) |
+| Bun | `js/` library (SQL triggers + `_changes`) | bun:sqlite (built-in) | Bun.serve (native) |
+| Node | `js/` library (SQL triggers + `_changes`) | better-sqlite3 | hyper-express (uWebSockets) |
 
 Go offers two capture modes via importable libraries: `trigger/` (default, database-level, cross-runtime) and `hook/` (opt-in, connection-level, Go-only, preupdate_hook + Pebble batch). Both share the same wire protocol — trigger nodes sync to hook nodes. Bun and Node use trigger-based capture only.
 
@@ -213,6 +222,48 @@ defer mgr.Stop()
 ```
 
 `ApplyChange()` is table-agnostic — column names come from `Change.Row` map, no hardcoded columns. `validTable()` validates table names (alphanumeric + underscore only) as defense-in-depth against SQL injection via table names (SQLite doesn't support parameterized table names).
+
+## JS Library
+
+The JS/TS replication core is published as [`hooksync.js`](https://www.npmjs.com/package/hooksync.js) on npm. One package works with both `bun:sqlite` and `better-sqlite3` — caller injects the database instance, library never imports a binding.
+
+```bash
+npm install hooksync.js
+# or
+bun add hooksync.js
+```
+
+```ts
+import { attach } from "hooksync.js";
+import { Database } from "bun:sqlite"; // or: const Database = require("better-sqlite3");
+
+const db = new Database("app.db");
+db.exec("PRAGMA journal_mode = WAL");
+
+// Your table — must have `id` (TEXT PRIMARY KEY) and `updated_at` (INTEGER) columns
+db.exec(`CREATE TABLE IF NOT EXISTS items(
+  id TEXT PRIMARY KEY, name TEXT, value INTEGER,
+  created_at INTEGER, updated_at INTEGER, node_id TEXT
+);`);
+
+// Attach sync — creates _meta, _changes, _dead_letter, _peer_state tables
+// and auto-generates triggers via PRAGMA table_info introspection
+const mgr = attach(db, {
+  id: "node1",
+  peers: ["http://localhost:9002"],
+  batchMs: 50,
+}, ["items"]);
+
+// Wire HTTP server (Bun.serve, http.createServer, Express, etc.)
+// POST /sync → mgr.applyChanges(body.changes)
+// GET /health → mgr.health()
+
+mgr.stop(); // shutdown
+```
+
+`attach()` returns a Manager with `applyChanges()`, `health()`, and `stop()`. The library handles trigger generation, ship loop with per-peer watermarks, dead letter queue, and LWW conflict resolution. Caller handles HTTP server + CRUD endpoints only.
+
+No hook capture mode for JS — neither `bun:sqlite` nor `better-sqlite3` has a preupdate hook API. Trigger-based only.
 
 ## Build & Run
 
@@ -519,11 +570,11 @@ The protocol is language-agnostic. Read [PROTOCOL.md](PROTOCOL.md) — it's ~300
 
 No consensus. No Raft. No coordinator. Just triggers + HTTP + ACK.
 
-Reference implementations: `go/cmd/server/main.go` (thin wrapper over `trigger/` library, ~240 lines), `go/cmd/hookserver/main.go` (thin wrapper over `hook/` library), `bun/server.ts` (~200 lines), `node/server.js` (~200 lines). All three sync to each other. Go libraries: `hooksync/` (shared core), `trigger/` (trigger capture), `hook/` (preupdate_hook capture).
+Reference implementations: `go/cmd/server/main.go` (thin wrapper over `trigger/` library, ~240 lines), `go/cmd/hookserver/main.go` (thin wrapper over `hook/` library), `bun/server.ts` (thin wrapper over `js/` library, ~120 lines), `node/server.js` (thin wrapper over `js/` library, ~110 lines). All three sync to each other. Libraries: Go `hooksync/` (shared core), `trigger/` (trigger capture), `hook/` (preupdate_hook capture); JS `hooksync.js` (npm package, shared core for Bun + Node).
 
 ## Limitations
 
-- **Multi-table setup** — Go libraries (`trigger/`, `hook/`) are table-agnostic: pass table names to `Attach()`/`Open()`, triggers/hooks are auto-generated via schema introspection. Bun and Node still require manual trigger setup per table (see `go/cmd/multitable/`, `bun/server-multitable.ts`, `node/server-multitable.js` for 2-table example)
+- **Multi-table setup** — Go libraries (`trigger/`, `hook/`) and JS library (`hooksync.js`) are table-agnostic: pass table names to `attach()`, triggers are auto-generated via schema introspection. Bun and Node wrappers still hardcode `items` table (see `go/cmd/multitable/`, `bun/server-multitable.ts`, `node/server-multitable.js` for 2-table example with manual trigger setup)
 - **Localhost benchmark variance** — HTTP throughput varies 3-8x on localhost; use real network for reliable comparison
 - **Last-write-wins, not CRDT** — split-brain conflicts resolve by timestamp. Older update is silently dropped. Fine for append-heavy workloads; for collaborative editing of shared rows, use cr-sqlite
 
