@@ -1,5 +1,5 @@
 {
-  "name": "@maulanashalihin/hook-sync",
+  "name": "hooksync.js",
   "version": "0.1.1",
   "description": "SQLite replication library — trigger-based change capture, ACK-based sync, last-write-wins conflict resolution. Works with bun:sqlite and better-sqlite3.",
   "type": "module",

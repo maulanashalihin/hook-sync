@@ -1,19 +1,19 @@
-# @maulanashalihin/hook-sync
+# hooksync.js
 
 > SQLite replication library for Bun and Node.js. Trigger-based change capture, ACK-based sync, last-write-wins conflict resolution.
 
 ## Install
 
 ```bash
-npm install @maulanashalihin/hook-sync
+npm install hooksync.js
 # or
-bun add @maulanashalihin/hook-sync
+bun add hooksync.js
 ```
 
 ## Quick Start
 
 ```ts
-import { attach } from "@maulanashalihin/hook-sync";
+import { attach } from "hooksync.js";
 import { Database } from "bun:sqlite"; // or: const Database = require("better-sqlite3");
 
 const db = new Database("app.db");
