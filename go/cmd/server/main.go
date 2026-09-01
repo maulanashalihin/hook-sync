@@ -1,62 +1,29 @@
 package main
 
 import (
-	"bytes"
 	"database/sql"
 	"encoding/json"
 	"flag"
-	"fmt"
-	"io"
 	"log"
-	"net/http"
 	"time"
+
+	"hook-sync/hooksync"
+	"hook-sync/trigger"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
 	_ "github.com/mattn/go-sqlite3"
 )
 
-// Change represents a single row-level change captured by triggers
-type Change struct {
-	Op    string         `json:"op"`     // INSERT, UPDATE, DELETE
-	Table string         `json:"table"`  // always "items"
-	Row   map[string]any `json:"row"`    // new row values (for INSERT/UPDATE)
-	OldID string         `json:"old_id"` // for DELETE
-}
-
-// SyncRequest is the ACK-based sync payload sent to peer
-type SyncRequest struct {
-	BatchID int64     `json:"batch_id"`
-	Changes []Change  `json:"changes"`
-}
-
-// SyncResponse is the ACK from peer
-type SyncResponse struct {
-	Applied int   `json:"applied"`
-	Ack     int64 `json:"ack"`
-}
-
-// Node is a single sync node
-type Node struct {
-	ID            string
-	DBPath        string
-	Listen        string
-	PeerURL       string
-	db            *sql.DB
-	batchInterval time.Duration
-	batchSize     int
-	noTrigger     bool
-}
-
 func main() {
 	var (
-		id      = flag.String("id", "", "node ID (e.g. node1)")
-		dbPath  = flag.String("db", "", "SQLite DB path")
-		listen  = flag.String("listen", "", "HTTP listen address (e.g. :9001)")
+		id        = flag.String("id", "", "node ID (e.g. node1)")
+		dbPath    = flag.String("db", "", "SQLite DB path")
+		listen    = flag.String("listen", "", "HTTP listen address (e.g. :9001)")
 		batchSize = flag.Int("batch-size", 10000, "max changes per ship batch")
-		batchMs = flag.Int("batch-ms", 50, "batch ship interval in milliseconds")
+		batchMs   = flag.Int("batch-ms", 50, "batch ship interval in milliseconds")
 		noTrigger = flag.Bool("no-trigger", false, "disable triggers and sync (baseline for bench)")
-		peerURL = flag.String("peer", "", "peer URL (e.g. http://localhost:9002)")
+		peerURL   = flag.String("peer", "", "peer URL (e.g. http://localhost:9002)")
 	)
 	flag.Parse()
 
@@ -64,267 +31,63 @@ func main() {
 		log.Fatal("usage: hook-sync -id node1 -db node1.db -listen :9001 -peer http://localhost:9002")
 	}
 
-	node := &Node{
-		ID:            *id,
-		DBPath:        *dbPath,
-		Listen:        *listen,
-		batchSize:     *batchSize,
-		batchInterval: time.Duration(*batchMs) * time.Millisecond,
-		PeerURL:       *peerURL,
-		noTrigger:     *noTrigger,
-	}
+	nodeID := *id
 
-	node.initDB()
-	node.setupSchema()
-	if !node.noTrigger {
-		go node.batchShip()
-	}
-	node.startHTTP()
-
-	log.Printf("[%s] listening on %s, peer=%s", *id, *listen, *peerURL)
-	select{} // block forever
-}
-
-func (n *Node) initDB() {
-	dsn := n.DBPath + "?_journal_mode=WAL&_synchronous=NORMAL&_busy_timeout=5000"
+	dsn := *dbPath + "?_journal_mode=WAL&_synchronous=NORMAL&_busy_timeout=5000"
 	db, err := sql.Open("sqlite3", dsn)
 	if err != nil {
 		log.Fatalf("open db: %v", err)
 	}
-	n.db = db
 	db.SetMaxOpenConns(1)
-}
 
-func (n *Node) setupSchema() {
-	if n.noTrigger {
-		// Baseline: items table only, no triggers, no _changes, no sync tables
-		_, err := n.db.Exec(`CREATE TABLE IF NOT EXISTS items (
-			id TEXT PRIMARY KEY, name TEXT, value INTEGER,
-			created_at INTEGER, updated_at INTEGER, node_id TEXT
-		)`)
+	// Create items table (application schema)
+	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS items (
+		id TEXT PRIMARY KEY, name TEXT, value INTEGER,
+		created_at INTEGER, updated_at INTEGER, node_id TEXT
+	)`)
+	if err != nil {
+		log.Fatalf("create items table: %v", err)
+	}
+
+	// Attach trigger-based sync (unless baseline mode)
+	var mgr *trigger.Manager
+	if !*noTrigger {
+		var peers []string
+		if *peerURL != "" {
+			peers = append(peers, *peerURL)
+		}
+		mgr, err = trigger.Attach(db, hooksync.Config{
+			ID:        nodeID,
+			Peers:     peers,
+			BatchMs:   *batchMs,
+			BatchSize: *batchSize,
+		}, []string{"items"})
 		if err != nil {
-			log.Fatalf("setup schema (no-trigger): %v", err)
+			log.Fatalf("trigger attach: %v", err)
 		}
-		return
-	}
-	_, err := n.db.Exec(`
-		CREATE TABLE IF NOT EXISTS items (
-			id TEXT PRIMARY KEY,
-			name TEXT,
-			value INTEGER,
-			created_at INTEGER,
-			updated_at INTEGER,
-			node_id TEXT
-		);
-
-		CREATE TABLE IF NOT EXISTS _meta (
-			key TEXT PRIMARY KEY,
-			value INTEGER
-		);
-		INSERT OR IGNORE INTO _meta(key, value) VALUES('syncing', 0);
-
-		CREATE TABLE IF NOT EXISTS _changes (
-			change_id INTEGER PRIMARY KEY AUTOINCREMENT,
-			op TEXT,
-			row_id TEXT,
-			row_data TEXT
-		);
-
-		CREATE TABLE IF NOT EXISTS _dead_letter (
-			dead_id INTEGER PRIMARY KEY AUTOINCREMENT,
-			op TEXT,
-			row_id TEXT,
-			row_data TEXT,
-			failed_at INTEGER,
-			retry_count INTEGER DEFAULT 0
-		);
-
-		CREATE TRIGGER IF NOT EXISTS items_ai AFTER INSERT ON items
-		WHEN (SELECT value FROM _meta WHERE key = 'syncing') = 0
-		BEGIN
-			INSERT INTO _changes(op, row_id, row_data) VALUES('INSERT', NEW.id,
-				json_object('id', NEW.id, 'name', NEW.name, 'value', NEW.value,
-					'created_at', NEW.created_at, 'updated_at', NEW.updated_at, 'node_id', NEW.node_id));
-		END;
-
-		CREATE TRIGGER IF NOT EXISTS items_au AFTER UPDATE ON items
-		WHEN (SELECT value FROM _meta WHERE key = 'syncing') = 0
-		BEGIN
-			INSERT INTO _changes(op, row_id, row_data) VALUES('UPDATE', NEW.id,
-				json_object('id', NEW.id, 'name', NEW.name, 'value', NEW.value,
-					'created_at', NEW.created_at, 'updated_at', NEW.updated_at, 'node_id', NEW.node_id));
-		END;
-
-		CREATE TRIGGER IF NOT EXISTS items_ad AFTER DELETE ON items
-		WHEN (SELECT value FROM _meta WHERE key = 'syncing') = 0
-		BEGIN
-			INSERT INTO _changes(op, row_id, row_data) VALUES('DELETE', OLD.id,
-				json_object('id', OLD.id, 'name', OLD.name, 'value', OLD.value,
-					'created_at', OLD.created_at, 'updated_at', OLD.updated_at, 'node_id', OLD.node_id));
-		END;
-	`)
-	if err != nil {
-		log.Fatalf("setup schema: %v", err)
-	}
-}
-
-// batchShip polls _changes every batchInterval, ships with ACK, deletes on confirmation.
-// Drain mode: ships all pending changes in batches until _changes is empty within each tick.
-// Retry with exponential backoff on failure. After 5 failures, move to _dead_letter.
-func (n *Node) batchShip() {
-	ticker := time.NewTicker(n.batchInterval)
-	defer ticker.Stop()
-
-	backoffs := []time.Duration{50, 100, 200, 400, 800}
-
-	for range ticker.C {
-		if n.PeerURL == "" {
-			continue
-		}
-
-		// Drain mode: ship until _changes is empty within this tick
-		for {
-			rows, err := n.db.Query("SELECT change_id, op, row_id, row_data FROM _changes ORDER BY change_id LIMIT ?", n.batchSize)
-			if err != nil {
-				log.Printf("[%s] query _changes error: %v", n.ID, err)
-				break
-			}
-
-			type changeRow struct {
-				ChangeID int64
-				Op       string
-				RowID    string
-				RowData  string
-			}
-			var crs []changeRow
-			for rows.Next() {
-				var cr changeRow
-				var rowData sql.NullString
-				if err := rows.Scan(&cr.ChangeID, &cr.Op, &cr.RowID, &rowData); err != nil {
-					log.Printf("[%s] scan _changes error: %v", n.ID, err)
-					continue
-				}
-				cr.RowData = rowData.String
-				crs = append(crs, cr)
-			}
-			rows.Close()
-
-			if len(crs) == 0 {
-				break // _changes empty, done draining
-			}
-
-			// Build changes payload
-			changes := make([]Change, 0, len(crs))
-			var batchID int64
-			for _, cr := range crs {
-				if cr.ChangeID > batchID {
-					batchID = cr.ChangeID
-				}
-				c := Change{Op: cr.Op, Table: "items"}
-				if cr.Op == "DELETE" {
-					c.OldID = cr.RowID
-					if cr.RowData != "" {
-						json.Unmarshal([]byte(cr.RowData), &c.Row)
-					}
-				} else if cr.RowData != "" {
-					json.Unmarshal([]byte(cr.RowData), &c.Row)
-				}
-				changes = append(changes, c)
-			}
-
-			// Ship with retry
-			acked := false
-			connError := false
-			for attempt := 0; attempt < 5; attempt++ {
-				if attempt > 0 {
-					time.Sleep(backoffs[attempt-1] * time.Millisecond)
-				}
-				resp, err := n.shipWithAck(batchID, changes)
-				if err != nil {
-					log.Printf("[%s] ship attempt %d error: %v", n.ID, attempt+1, err)
-					connError = true
-					continue
-				}
-				connError = false
-				if resp.Ack == batchID {
-					// ACK confirmed — delete shipped changes
-					n.db.Exec("DELETE FROM _changes WHERE change_id <= ?", batchID)
-					acked = true
-					break
-				}
-				log.Printf("[%s] ship attempt %d ACK mismatch: got %d want %d", n.ID, attempt+1, resp.Ack, batchID)
-			}
-
-			if !acked {
-				if connError {
-					// Peer not reachable — keep changes in _changes, try again next tick
-					log.Printf("[%s] peer unreachable, keeping %d changes for next tick", n.ID, len(crs))
-					break // stop draining, try again next tick
-				}
-				log.Printf("[%s] ship failed after 5 retries (ACK mismatch), moving to _dead_letter", n.ID)
-				for _, cr := range crs {
-					n.db.Exec("INSERT INTO _dead_letter(op, row_id, row_data, failed_at, retry_count) VALUES(?, ?, ?, ?, ?)",
-						cr.Op, cr.RowID, cr.RowData, time.Now().UnixMilli(), 5)
-				}
-				n.db.Exec("DELETE FROM _changes WHERE change_id <= ?", batchID)
-				break // stop draining on persistent failure
-			}
-		}
-	}
-}
-
-func (n *Node) shipWithAck(batchID int64, changes []Change) (*SyncResponse, error) {
-	reqBody := SyncRequest{BatchID: batchID, Changes: changes}
-	data, err := json.Marshal(reqBody)
-	if err != nil {
-		return nil, fmt.Errorf("marshal: %w", err)
+		defer mgr.Stop()
 	}
 
-	url := n.PeerURL + "/sync"
-	req, err := http.NewRequest("POST", url, bytes.NewReader(data))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Node-Id", n.ID)
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("ship failed: %d %s", resp.StatusCode, string(body))
-	}
-
-	var sr SyncResponse
-	if err := json.NewDecoder(resp.Body).Decode(&sr); err != nil {
-		return nil, fmt.Errorf("decode response: %w", err)
-	}
-	return &sr, nil
-}
-
-func (n *Node) startHTTP() {
 	app := fiber.New(fiber.Config{
 		DisableStartupMessage: true,
 		BodyLimit:             16 * 1024 * 1024,
 	})
 
 	// POST /sync — receive changes from peer (ACK-based)
-	app.Post("/sync", func(c *fiber.Ctx) error {
-		var req SyncRequest
-		if err := json.Unmarshal(c.Body(), &req); err != nil {
-			return c.Status(400).JSON(fiber.Map{"error": err.Error()})
-		}
-		applied := n.applyChanges(req.Changes)
-		return c.JSON(fiber.Map{"applied": applied, "ack": req.BatchID})
-	})
+	if mgr != nil {
+		app.Post("/sync", func(c *fiber.Ctx) error {
+			var req hooksync.SyncRequest
+			if err := json.Unmarshal(c.Body(), &req); err != nil {
+				return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+			}
+			applied := mgr.ApplyChanges(req.Changes)
+			return c.JSON(fiber.Map{"applied": applied, "ack": req.BatchID})
+		})
+	}
 
 	// GET /api/items — list all items
 	app.Get("/api/items", func(c *fiber.Ctx) error {
-		rows, err := n.db.Query("SELECT id, name, value, created_at, updated_at, node_id FROM items ORDER BY created_at DESC LIMIT 100")
+		rows, err := db.Query("SELECT id, name, value, created_at, updated_at, node_id FROM items ORDER BY created_at DESC LIMIT 100")
 		if err != nil {
 			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
 		}
@@ -354,7 +117,7 @@ func (n *Node) startHTTP() {
 		id := c.Params("id")
 		var itemID, name, nodeID string
 		var value, createdAt, updatedAt int64
-		err := n.db.QueryRow("SELECT id, name, value, created_at, updated_at, node_id FROM items WHERE id = ?", id).
+		err := db.QueryRow("SELECT id, name, value, created_at, updated_at, node_id FROM items WHERE id = ?", id).
 			Scan(&itemID, &name, &value, &createdAt, &updatedAt, &nodeID)
 		if err != nil {
 			return c.Status(404).JSON(fiber.Map{"error": "not found"})
@@ -378,16 +141,16 @@ func (n *Node) startHTTP() {
 		id, _ := uuid.NewV7()
 		idStr := id.String()
 		now := time.Now().UnixMilli()
-		_, err := n.db.Exec(
+		_, err := db.Exec(
 			"INSERT INTO items(id, name, value, created_at, updated_at, node_id) VALUES(?, ?, ?, ?, ?, ?)",
-			idStr, body.Name, body.Value, now, now, n.ID,
+			idStr, body.Name, body.Value, now, now, nodeID,
 		)
 		if err != nil {
 			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
 		}
 		return c.JSON(map[string]any{
 			"id": idStr, "name": body.Name, "value": body.Value,
-			"created_at": now, "node_id": n.ID,
+			"created_at": now, "node_id": nodeID,
 		})
 	})
 
@@ -401,7 +164,7 @@ func (n *Node) startHTTP() {
 			return c.Status(400).JSON(fiber.Map{"error": err.Error()})
 		}
 
-		tx, err := n.db.Begin()
+		tx, err := db.Begin()
 		if err != nil {
 			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
 		}
@@ -410,7 +173,7 @@ func (n *Node) startHTTP() {
 			id, _ := uuid.NewV7()
 			_, err := tx.Exec(
 				"INSERT INTO items(id, name, value, created_at, updated_at, node_id) VALUES(?, ?, ?, ?, ?, ?)",
-				id.String(), item.Name, item.Value, now, now, n.ID,
+				id.String(), item.Name, item.Value, now, now, nodeID,
 			)
 			if err != nil {
 				tx.Rollback()
@@ -434,7 +197,7 @@ func (n *Node) startHTTP() {
 			return c.Status(400).JSON(fiber.Map{"error": err.Error()})
 		}
 		now := time.Now().UnixMilli()
-		_, err := n.db.Exec(
+		_, err := db.Exec(
 			"UPDATE items SET name=?, value=?, updated_at=? WHERE id=?",
 			body.Name, body.Value, now, id,
 		)
@@ -449,7 +212,7 @@ func (n *Node) startHTTP() {
 	// DELETE /api/items/:id — delete item (local write)
 	app.Delete("/api/items/:id", func(c *fiber.Ctx) error {
 		id := c.Params("id")
-		_, err := n.db.Exec("DELETE FROM items WHERE id=?", id)
+		_, err := db.Exec("DELETE FROM items WHERE id=?", id)
 		if err != nil {
 			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
 		}
@@ -458,111 +221,19 @@ func (n *Node) startHTTP() {
 
 	// GET /health
 	app.Get("/health", func(c *fiber.Ctx) error {
+		if mgr != nil {
+			h := mgr.Health()
+			return c.JSON(h)
+		}
+		// Baseline mode (no trigger)
 		var count int
-		n.db.QueryRow("SELECT COUNT(*) FROM items").Scan(&count)
-		var pendingChanges int
-		n.db.QueryRow("SELECT COUNT(*) FROM _changes").Scan(&pendingChanges)
-		var deadLetter int
-		n.db.QueryRow("SELECT COUNT(*) FROM _dead_letter").Scan(&deadLetter)
+		db.QueryRow("SELECT COUNT(*) FROM items").Scan(&count)
 		return c.JSON(fiber.Map{
-			"ok": true, "node_id": n.ID, "item_count": count,
-			"pending_changes": pendingChanges, "dead_letter": deadLetter,
+			"ok": true, "node_id": nodeID, "item_count": count,
+			"pending_changes": 0, "dead_letter": 0,
 		})
 	})
 
-	go app.Listen(n.Listen)
-}
-
-// applyChanges applies received changes from peer in a single transaction.
-// Sets syncing flag in _meta so triggers don't capture sync-applied changes.
-func (n *Node) applyChanges(changes []Change) int {
-	tx, err := n.db.Begin()
-	if err != nil {
-		log.Printf("[%s] begin tx error: %v", n.ID, err)
-		return 0
-	}
-	defer tx.Rollback()
-
-	// Set syncing flag
-	tx.Exec("UPDATE _meta SET value = 1 WHERE key = 'syncing'")
-
-	applied := 0
-	for _, c := range changes {
-		switch c.Op {
-		case "INSERT", "UPDATE":
-			if c.Row == nil {
-				continue
-			}
-			id, _ := c.Row["id"].(string)
-			if id == "" {
-				continue
-			}
-			name, _ := c.Row["name"].(string)
-			value := toInt64(c.Row["value"])
-			createdAt := toInt64(c.Row["created_at"])
-			updatedAt := toInt64(c.Row["updated_at"])
-			nodeID, _ := c.Row["node_id"].(string)
-
-			// Last-write-wins: skip if existing row is newer than incoming
-			var existingUpdatedAt int64
-			if err := tx.QueryRow("SELECT updated_at FROM items WHERE id = ?", id).Scan(&existingUpdatedAt); err == nil {
-				if existingUpdatedAt > updatedAt {
-					continue
-				}
-			}
-			_, err := tx.Exec(
-				"INSERT OR REPLACE INTO items(id, name, value, created_at, updated_at, node_id) VALUES(?, ?, ?, ?, ?, ?)",
-				id, name, value, createdAt, updatedAt, nodeID,
-			)
-			if err != nil {
-				log.Printf("[%s] apply error: %v", n.ID, err)
-				continue
-			}
-			applied++
-
-		case "DELETE":
-			if c.OldID == "" {
-				continue
-			}
-			// Last-write-wins: skip delete if row was updated after deletion
-			if c.Row != nil {
-				deleteUpdatedAt := toInt64(c.Row["updated_at"])
-				var existingUpdatedAt int64
-				if err := tx.QueryRow("SELECT updated_at FROM items WHERE id = ?", c.OldID).Scan(&existingUpdatedAt); err == nil {
-					if existingUpdatedAt > deleteUpdatedAt {
-						continue // row was updated after delete, keep the update
-					}
-				}
-			}
-			_, err := tx.Exec("DELETE FROM items WHERE id = ?", c.OldID)
-			if err != nil {
-				log.Printf("[%s] delete error: %v", n.ID, err)
-				continue
-			}
-			applied++
-		}
-	}
-
-	// Clear syncing flag before commit so triggers see the final state
-	tx.Exec("UPDATE _meta SET value = 0 WHERE key = 'syncing'")
-
-	if err := tx.Commit(); err != nil {
-		log.Printf("[%s] commit error: %v", n.ID, err)
-		return 0
-	}
-	return applied
-}
-
-// toInt64 converts any numeric value from JSON unmarshal to int64
-func toInt64(v any) int64 {
-	switch n := v.(type) {
-	case int64:
-		return n
-	case float64:
-		return int64(n)
-	case int:
-		return int64(n)
-	default:
-		return 0
-	}
+	log.Printf("[%s] listening on %s, peer=%s", *id, *listen, *peerURL)
+	log.Fatal(app.Listen(*listen))
 }

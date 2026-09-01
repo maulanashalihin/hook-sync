@@ -1,6 +1,6 @@
 //go:build sqlite_preupdate_hook
 
-// hookmem: preupdate_hook + in-memory slice (no Pebble, no SQLite _changes table).
+// hookmem: preupdate_hook + in-memory slice (no Pebble, no persistence).
 // Simplest possible change capture: hook appends to slice, shipLoop drains and ships.
 // No persistence of pending changes — if node crashes before ship, changes lost.
 // Purpose: benchmark baseline to measure Pebble overhead vs pure in-memory.
@@ -8,59 +8,18 @@
 package main
 
 import (
-	"bytes"
 	"database/sql"
 	"encoding/json"
 	"flag"
-	"io"
 	"log"
-	"net/http"
-	"sync"
-	"sync/atomic"
 	"time"
+
+	"hook-sync/hook"
+	"hook-sync/hooksync"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
-	"github.com/mattn/go-sqlite3"
 )
-
-type Change struct {
-	Op    string         `json:"op"`
-	Table string         `json:"table"`
-	Row   map[string]any `json:"row"`
-	OldID string         `json:"old_id"`
-}
-
-type SyncRequest struct {
-	BatchID int64    `json:"batch_id"`
-	Changes []Change `json:"changes"`
-}
-
-type SyncResponse struct {
-	Applied int   `json:"applied"`
-	Ack     int64 `json:"ack"`
-}
-
-type pendingChange struct {
-	seq     int64
-	rowID   string
-	op      string
-	rowData string
-}
-
-type Node struct {
-	ID            string
-	DBPath        string
-	Listen        string
-	PeerURL       string
-	db            *sql.DB
-	batchInterval time.Duration
-	batchSize     int
-	syncing       atomic.Bool
-	seqCounter    int64
-	pending       []pendingChange
-	mu            sync.Mutex
-}
 
 func main() {
 	id := flag.String("id", "", "node ID")
@@ -75,98 +34,57 @@ func main() {
 		log.Fatal("usage: hook-sync-hookmem -id node1 -db node1.db -listen :9001 -peer http://localhost:9002")
 	}
 
-	n := &Node{
-		ID: *id, DBPath: *dbPath, Listen: *listen, PeerURL: *peerURL,
-		batchSize: *batchSize, batchInterval: time.Duration(*batchMs) * time.Millisecond,
-	}
+	nodeID := *id
 
-	driverName := "sqlite3_hm_" + n.ID
-	sql.Register(driverName, &sqlite3.SQLiteDriver{
-		ConnectHook: func(c *sqlite3.SQLiteConn) error {
-			c.RegisterPreUpdateHook(func(data sqlite3.SQLitePreUpdateData) {
-				if n.syncing.Load() || data.TableName != "items" {
-					return
-				}
-				seq := atomic.AddInt64(&n.seqCounter, 1)
-
-				var row []any
-				var rowID string
-				if data.Op == sqlite3.SQLITE_DELETE {
-					row = make([]any, data.Count())
-					data.Old(row...)
-				} else {
-					row = make([]any, data.Count())
-					data.New(row...)
-				}
-				if id, ok := row[0].([]byte); ok {
-					rowID = string(id)
-				}
-
-				op := "INSERT"
-				switch data.Op {
-				case sqlite3.SQLITE_UPDATE:
-					op = "UPDATE"
-				case sqlite3.SQLITE_DELETE:
-					op = "DELETE"
-				}
-
-				cols := []string{"id", "name", "value", "created_at", "updated_at", "node_id"}
-				obj := map[string]any{}
-				for i, col := range cols {
-					if i >= len(row) {
-						break
-					}
-					switch v := row[i].(type) {
-					case []byte:
-						obj[col] = string(v)
-					case int64:
-						obj[col] = v
-					default:
-						obj[col] = nil
-					}
-				}
-				rowJSON, _ := json.Marshal(obj)
-
-				n.mu.Lock()
-				n.pending = append(n.pending, pendingChange{
-					seq: seq, rowID: rowID, op: op, rowData: string(rowJSON),
-				})
-				n.mu.Unlock()
-			})
-			return nil
-		},
-	})
-
-	db, err := sql.Open(driverName, n.DBPath+"?_journal_mode=WAL&_synchronous=NORMAL&_busy_timeout=5000")
+	// Create items table first (hook.OpenInMemory introspects it for column names)
+	dsn := *dbPath + "?_journal_mode=WAL&_synchronous=NORMAL&_busy_timeout=5000"
+	db, err := sql.Open("sqlite3", dsn)
 	if err != nil {
-		log.Fatalf("sqlite: %v", err)
+		log.Fatalf("open db: %v", err)
 	}
-	db.SetMaxOpenConns(1)
-	n.db = db
-
-	db.Exec(`CREATE TABLE IF NOT EXISTS items (
+	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS items (
 		id TEXT PRIMARY KEY, name TEXT, value INTEGER,
 		created_at INTEGER, updated_at INTEGER, node_id TEXT
 	)`)
-
-	if n.PeerURL != "" {
-		go n.shipLoop()
+	if err != nil {
+		log.Fatalf("create items table: %v", err)
 	}
+	db.Close()
+
+	// Open hook-based sync (in-memory, no Pebble)
+	var peers []string
+	if *peerURL != "" {
+		peers = append(peers, *peerURL)
+	}
+	mgr, err := hook.OpenInMemory(*dbPath, hooksync.Config{
+		ID:        nodeID,
+		Peers:     peers,
+		BatchMs:   *batchMs,
+		BatchSize: *batchSize,
+	}, []string{"items"})
+	if err != nil {
+		log.Fatalf("hook open: %v", err)
+	}
+	defer mgr.Stop()
+
+	db = mgr.DB()
 
 	app := fiber.New(fiber.Config{DisableStartupMessage: true, BodyLimit: 16 * 1024 * 1024})
 
+	// POST /sync — receive changes from peer (ACK-based)
 	app.Post("/sync", func(c *fiber.Ctx) error {
-		var req SyncRequest
+		var req hooksync.SyncRequest
 		json.Unmarshal(c.Body(), &req)
-		applied := n.applyChanges(req.Changes)
+		applied := mgr.ApplyChanges(req.Changes)
 		return c.JSON(fiber.Map{"applied": applied, "ack": req.BatchID})
 	})
 
+	// GET /api/items/:id
 	app.Get("/api/items/:id", func(c *fiber.Ctx) error {
 		id := c.Params("id")
 		var itemID, name, nodeID string
 		var value, createdAt, updatedAt int64
-		err := n.db.QueryRow("SELECT id, name, value, created_at, updated_at, node_id FROM items WHERE id = ?", id).
+		err := db.QueryRow("SELECT id, name, value, created_at, updated_at, node_id FROM items WHERE id = ?", id).
 			Scan(&itemID, &name, &value, &createdAt, &updatedAt, &nodeID)
 		if err != nil {
 			return c.Status(404).JSON(fiber.Map{"error": "not found"})
@@ -177,8 +95,9 @@ func main() {
 		})
 	})
 
+	// GET /api/items
 	app.Get("/api/items", func(c *fiber.Ctx) error {
-		rows, _ := n.db.Query("SELECT id, name, value, created_at, updated_at, node_id FROM items ORDER BY created_at DESC LIMIT 100")
+		rows, _ := db.Query("SELECT id, name, value, created_at, updated_at, node_id FROM items ORDER BY created_at DESC LIMIT 100")
 		defer rows.Close()
 		items := []map[string]any{}
 		for rows.Next() {
@@ -195,6 +114,7 @@ func main() {
 		return c.JSON(items)
 	})
 
+	// POST /api/items
 	app.Post("/api/items", func(c *fiber.Ctx) error {
 		var body struct {
 			Name  string `json:"name"`
@@ -203,23 +123,24 @@ func main() {
 		c.BodyParser(&body)
 		id, _ := uuid.NewV7()
 		now := time.Now().UnixMilli()
-		n.db.Exec("INSERT INTO items(id, name, value, created_at, updated_at, node_id) VALUES(?, ?, ?, ?, ?, ?)",
-			id.String(), body.Name, body.Value, now, now, n.ID)
-		return c.JSON(fiber.Map{"id": id.String(), "name": body.Name, "value": body.Value, "created_at": now, "node_id": n.ID})
+		db.Exec("INSERT INTO items(id, name, value, created_at, updated_at, node_id) VALUES(?, ?, ?, ?, ?, ?)",
+			id.String(), body.Name, body.Value, now, now, nodeID)
+		return c.JSON(fiber.Map{"id": id.String(), "name": body.Name, "value": body.Value, "created_at": now, "node_id": nodeID})
 	})
 
+	// POST /api/items/batch
 	app.Post("/api/items/batch", func(c *fiber.Ctx) error {
 		var items []struct {
 			Name  string `json:"name"`
 			Value int    `json:"value"`
 		}
 		c.BodyParser(&items)
-		tx, _ := n.db.Begin()
+		tx, _ := db.Begin()
 		now := time.Now().UnixMilli()
 		for _, item := range items {
 			id, _ := uuid.NewV7()
 			if _, err := tx.Exec("INSERT INTO items(id, name, value, created_at, updated_at, node_id) VALUES(?, ?, ?, ?, ?, ?)",
-				id.String(), item.Name, item.Value, now, now, n.ID); err != nil {
+				id.String(), item.Name, item.Value, now, now, nodeID); err != nil {
 				tx.Rollback()
 				return c.Status(500).JSON(fiber.Map{"error": err.Error()})
 			}
@@ -228,6 +149,7 @@ func main() {
 		return c.JSON(fiber.Map{"created": len(items)})
 	})
 
+	// PUT /api/items/:id
 	app.Put("/api/items/:id", func(c *fiber.Ctx) error {
 		id := c.Params("id")
 		var body struct {
@@ -236,166 +158,23 @@ func main() {
 		}
 		c.BodyParser(&body)
 		now := time.Now().UnixMilli()
-		n.db.Exec("UPDATE items SET name=?, value=?, updated_at=? WHERE id=?", body.Name, body.Value, now, id)
+		db.Exec("UPDATE items SET name=?, value=?, updated_at=? WHERE id=?", body.Name, body.Value, now, id)
 		return c.JSON(fiber.Map{"id": id, "name": body.Name, "value": body.Value, "updated_at": now})
 	})
 
+	// DELETE /api/items/:id
 	app.Delete("/api/items/:id", func(c *fiber.Ctx) error {
 		id := c.Params("id")
-		n.db.Exec("DELETE FROM items WHERE id=?", id)
+		db.Exec("DELETE FROM items WHERE id=?", id)
 		return c.JSON(fiber.Map{"deleted": id})
 	})
 
+	// GET /health
 	app.Get("/health", func(c *fiber.Ctx) error {
-		var count int
-		n.db.QueryRow("SELECT COUNT(*) FROM items").Scan(&count)
-		n.mu.Lock()
-		pending := len(n.pending)
-		n.mu.Unlock()
-		return c.JSON(fiber.Map{"ok": true, "node_id": n.ID, "item_count": count, "pending_changes": pending, "dead_letter": 0, "mode": "hookmem"})
+		h := mgr.Health()
+		return c.JSON(h)
 	})
 
-	log.Printf("[%s] hookmem on %s, peer=%s", *id, *listen, *peerURL)
-	app.Listen(*listen)
-}
-
-func (n *Node) shipLoop() {
-	ticker := time.NewTicker(n.batchInterval)
-	defer ticker.Stop()
-	for range ticker.C {
-		n.drainAndShip()
-	}
-}
-
-func (n *Node) drainAndShip() {
-	n.mu.Lock()
-	if len(n.pending) == 0 {
-		n.mu.Unlock()
-		return
-	}
-	pending := n.pending
-	n.pending = nil
-	n.mu.Unlock()
-
-	var changes []Change
-	var lastSeq int64
-	for _, pc := range pending {
-		c := Change{Op: pc.op, Table: "items"}
-		c.OldID = pc.rowID
-		json.Unmarshal([]byte(pc.rowData), &c.Row)
-		changes = append(changes, c)
-		if pc.seq > lastSeq {
-			lastSeq = pc.seq
-		}
-		if len(changes) >= n.batchSize {
-			break
-		}
-	}
-
-	// If we didn't drain all, put the rest back
-	if len(changes) < len(pending) {
-		remaining := pending[len(changes):]
-		n.mu.Lock()
-		n.pending = append(remaining, n.pending...)
-		n.mu.Unlock()
-	}
-
-	data, _ := json.Marshal(SyncRequest{BatchID: lastSeq, Changes: changes})
-	resp, err := http.Post(n.PeerURL+"/sync", "application/json", bytes.NewReader(data))
-	if err != nil {
-		log.Printf("[%s] ship error: %v", n.ID, err)
-		// Put changes back
-		n.mu.Lock()
-		n.pending = append(pending[:len(changes)], n.pending...)
-		n.mu.Unlock()
-		return
-	}
-	body, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-
-	var sr SyncResponse
-	json.Unmarshal(body, &sr)
-	if sr.Ack == lastSeq {
-		log.Printf("[%s] shipped %d changes", n.ID, len(changes))
-	} else {
-		// Put changes back
-		n.mu.Lock()
-		n.pending = append(pending[:len(changes)], n.pending...)
-		n.mu.Unlock()
-	}
-}
-
-func (n *Node) applyChanges(changes []Change) int {
-	n.syncing.Store(true)
-	defer n.syncing.Store(false)
-
-	tx, err := n.db.Begin()
-	if err != nil {
-		return 0
-	}
-	defer tx.Rollback()
-
-	applied := 0
-	for _, c := range changes {
-		switch c.Op {
-		case "INSERT", "UPDATE":
-			if c.Row == nil {
-				continue
-			}
-			id, _ := c.Row["id"].(string)
-			if id == "" {
-				continue
-			}
-			name, _ := c.Row["name"].(string)
-			value := toInt64(c.Row["value"])
-			createdAt := toInt64(c.Row["created_at"])
-			updatedAt := toInt64(c.Row["updated_at"])
-			nodeID, _ := c.Row["node_id"].(string)
-
-			var existing int64
-			if tx.QueryRow("SELECT updated_at FROM items WHERE id = ?", id).Scan(&existing) == nil {
-				if existing > updatedAt {
-					continue
-				}
-			}
-			if _, err := tx.Exec("INSERT OR REPLACE INTO items(id, name, value, created_at, updated_at, node_id) VALUES(?, ?, ?, ?, ?, ?)",
-				id, name, value, createdAt, updatedAt, nodeID); err != nil {
-				continue
-			}
-			applied++
-		case "DELETE":
-			if c.OldID == "" {
-				continue
-			}
-			if c.Row != nil {
-				delUpdated := toInt64(c.Row["updated_at"])
-				var existing int64
-				if tx.QueryRow("SELECT updated_at FROM items WHERE id = ?", c.OldID).Scan(&existing) == nil {
-					if existing > delUpdated {
-						continue
-					}
-				}
-			}
-			tx.Exec("DELETE FROM items WHERE id = ?", c.OldID)
-			applied++
-		}
-	}
-
-	if tx.Commit() != nil {
-		return 0
-	}
-	return applied
-}
-
-func toInt64(v any) int64 {
-	switch n := v.(type) {
-	case int64:
-		return n
-	case float64:
-		return int64(n)
-	case int:
-		return int64(n)
-	default:
-		return 0
-	}
+	log.Printf("[%s] hookmem on %s, peer=%s", nodeID, *listen, *peerURL)
+	log.Fatal(app.Listen(*listen))
 }
