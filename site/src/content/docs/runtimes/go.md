@@ -1,0 +1,254 @@
+---
+title: Go
+description: Go libraries for hook-sync — trigger-based and hook-based capture modes. Importable packages, pre-built binaries, dedicated hub.
+---
+
+import { Aside, Steps, Card, CardGrid } from '@astrojs/starlight/components';
+
+# Go
+
+hook-sync provides three importable Go packages. Pick capture mode at import time — both modes share the same wire protocol and sync to each other transparently.
+
+## Quick Start
+
+<Steps>
+
+1. **Install the library**
+
+   ```bash
+   go get hook-sync/go/hooksync
+   go get hook-sync/go/trigger
+   ```
+
+2. **Attach sync to your database**
+
+   ```go
+   import (
+       "hook-sync/hooksync"
+       "hook-sync/trigger"
+   )
+
+   db, _ := sql.Open("sqlite3", "app.db")
+   mgr, _ := trigger.Attach(db, hooksync.Config{
+       ID: "node1",
+       Peers: []string{"http://localhost:9002"},
+       BatchMs: 50,
+   }, []string{"items"})
+   defer mgr.Stop()
+   ```
+
+3. **Wire the HTTP server**
+
+   ```go
+   http.Handle("/sync", mgr)  // mgr.ServeHTTP handles parse + apply + ACK
+   http.ListenAndServe(":9001", nil)
+   ```
+
+4. **Write to node A, verify on node B**
+
+   ```bash
+   curl -X POST http://localhost:9001/api/items \
+     -H 'Content-Type: application/json' \
+     -d '{"name":"hello","value":42}'
+
+   curl http://localhost:9002/api/items
+   # [{"id":"...","name":"hello","value":42,...}]
+   ```
+
+</Steps>
+
+## Two Capture Modes
+
+| | `trigger/` (default) | `hook/` (opt-in) |
+|---|---|---|
+| API | `trigger.Attach(db, config, tables)` | `hook.Open(path, config, tables)` |
+| Capture | SQL triggers → `_changes` table | preupdate_hook → Pebble KV |
+| Speed | Baseline | 35% faster (no `_changes` write) |
+| Build tag | none | `sqlite_preupdate_hook` |
+| CGO | standard SQLite | mattn/go-sqlite3 only |
+| Cross-runtime | Yes (syncs with Bun, Node) | Go-only (syncs with trigger nodes) |
+| Use when | Most apps (HTTP is bottleneck) | Write-heavy direct-SQLite (batch, analytics) |
+
+Both share the same wire protocol — trigger nodes sync to hook nodes, no interop issues.
+
+## Trigger Mode (Default)
+
+Cross-runtime, database-level capture. Uses SQL triggers + `_changes` table.
+
+```go
+import (
+    "hook-sync/hooksync"
+    "hook-sync/trigger"
+)
+
+db, _ := sql.Open("sqlite3", "app.db")
+mgr, _ := trigger.Attach(db, hooksync.Config{
+    ID: "node1",
+    Peers: []string{"http://peer:9002"},
+    BatchMs: 50,
+    BatchSize: 10000,
+}, []string{"items"})
+defer mgr.Stop()
+```
+
+## Hook Mode (35% Faster, Go-only)
+
+Connection-level capture via `preupdate_hook` + Pebble KV. Eliminates the `_changes` table write.
+
+```go
+import (
+    "hook-sync/hooksync"
+    "hook-sync/hook"
+)
+
+mgr, _ := hook.Open("app.db", hooksync.Config{
+    ID: "node1",
+    Peers: []string{"http://peer:9002"},
+    BatchMs: 50,
+    BatchSize: 10000,
+}, []string{"items"})
+defer mgr.Stop()
+```
+
+Build with the `sqlite_preupdate_hook` tag:
+
+```bash
+go build -tags sqlite_preupdate_hook -o myapp ./cmd/myapp
+```
+
+<Aside type="warning" title="Hook mode is Go-only">
+`preupdate_hook` is a C-level SQLite API not exposed by `bun:sqlite` or `better-sqlite3`. Hook mode nodes still sync to trigger mode nodes — the wire protocol is identical.
+</Aside>
+
+## HTTP Server Wiring
+
+Go's `trigger.Manager` implements `http.Handler`, so `/sync` is one line:
+
+```go
+http.Handle("/sync", mgr)  // mgr.ServeHTTP handles parse + apply + ACK
+http.ListenAndServe(":9001", nil)
+```
+
+The `ServeHTTP` method:
+
+1. Parses the JSON body (`batch_id` + `changes`)
+2. Applies each change via `ApplyChange()` with LWW conflict check
+3. Returns `{applied, ack: batch_id}`
+
+## API Reference
+
+### `hooksync.Config`
+
+```go
+type Config struct {
+    ID        string   // node identifier
+    Peers     []string // peer URLs (e.g., "http://localhost:9002")
+    BatchMs   int      // ship interval in ms (default: 50)
+    BatchSize int      // max changes per batch (default: 10000)
+}
+```
+
+### `hooksync.Change`
+
+```go
+type Change struct {
+    Op    string            // "INSERT", "UPDATE", "DELETE"
+    Table string            // table name
+    Row   map[string]any    // full row values
+    OldID *string           // row ID for DELETE, nil for INSERT/UPDATE
+}
+```
+
+### `trigger.Attach(db, config, tables) → Manager`
+
+Creates `_meta`, `_changes`, `_dead_letter`, `_peer_state` tables. Auto-generates INSERT/UPDATE/DELETE triggers via `PRAGMA table_info` introspection. Starts background ship loop.
+
+### `hook.Open(path, config, tables) → Manager`
+
+Opens SQLite with custom driver (preupdate_hook + commit_hook + rollback_hook). Pebble KV stores pending changes. Same Manager interface as trigger.
+
+### Manager methods
+
+| Method | Description |
+|--------|-------------|
+| `ServeHTTP(w, r)` | Handles `POST /sync` — parse, apply, ACK |
+| `ApplyChange(change)` | Apply single change with LWW conflict check |
+| `ShipWithAck(...)` | Ship batch to peer, return ACK response |
+| `Stop()` | Stop background ship loop |
+
+## Pre-built Binaries
+
+The repo includes thin wrapper binaries in `go/cmd/`:
+
+| Binary | Package | Description |
+|--------|---------|-------------|
+| `hook-sync-go` | `trigger/` | Single-peer, point-to-point |
+| `hook-sync-mesh-go` | `trigger/` | Multi-peer, full mesh |
+| `hook-sync-hookserver` | `hook/` | Hook capture mode (requires build tag) |
+| `hook-sync-hub` | — (standalone) | Dedicated hub relay (Pebble KV, no SQLite) |
+| `hook-sync-multitable` | `trigger/` | Multi-table (items + categories) |
+
+Build from source:
+
+```bash
+git clone https://github.com/maulanashalihin/hook-sync.git
+cd hook-sync/go
+go build -o ../hook-sync-go ./cmd/server
+go build -o ../hook-sync-mesh-go ./cmd/mesh
+go build -tags sqlite_preupdate_hook -o ../hook-sync-hookserver ./cmd/hookserver
+go build -o ../hook-sync-hub ./cmd/hub
+```
+
+The hub binary is also available as pre-built download — see [Dedicated Hub](/topologies/hub/).
+
+## Table Requirements
+
+Every synced table **must** have:
+
+- `id` — `TEXT PRIMARY KEY` (UUID, zero conflict)
+- `updated_at` — `INTEGER` (millisecond timestamp, for last-write-wins)
+
+```sql
+CREATE TABLE items(
+  id TEXT PRIMARY KEY,
+  name TEXT,
+  value INTEGER,
+  created_at INTEGER,
+  updated_at INTEGER
+);
+```
+
+## Multi-Peer (Full Mesh)
+
+```go
+mgr, _ := trigger.Attach(db, hooksync.Config{
+    ID: "nodeA",
+    Peers: []string{
+        "http://localhost:9002",
+        "http://localhost:9003",
+        "http://localhost:9004",
+    },
+    BatchMs: 50,
+}, []string{"items"})
+```
+
+Each peer has its own watermark. Changes deleted from `_changes` only after **all** peers ACK. See [Full Mesh](/topologies/full-mesh/).
+
+## Hub Topology (8+ Nodes)
+
+For 8+ nodes, use a dedicated hub — a Go-only relay binary with Pebble KV. See [Dedicated Hub](/topologies/hub/).
+
+<CardGrid stagger>
+  <Card title="Point-to-Point" icon="seti:custom" href="/topologies/point-to-point/">
+    2 nodes, active-active. Simplest setup.
+  </Card>
+  <Card title="Full Mesh" icon="seti:custom" href="/topologies/full-mesh/">
+    3-7 nodes, all-to-all sync.
+  </Card>
+  <Card title="Dedicated Hub" icon="seti:custom" href="/topologies/hub/">
+    8+ nodes. Go-only relay with Pebble KV.
+  </Card>
+  <Card title="Multi-Region" icon="seti:custom" href="/topologies/multi-region/">
+    Hub-to-hub cross-region sync.
+  </Card>
+</CardGrid>

@@ -818,7 +818,7 @@ a { color: inherit; text-decoration: none; }
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="6" cy="12" r="3"/><circle cx="18" cy="12" r="3"/><circle cx="12" cy="6" r="3"/><line x1="8.5" y1="11" x2="10.5" y2="8" stroke-linecap="round"/><line x1="15.5" y1="11" x2="13.5" y2="8" stroke-linecap="round"/><line x1="9" y1="12" x2="15" y2="12" stroke-linecap="round"/></svg>
       </div>
       <h3>Cross-Runtime</h3>
-      <p>Go, Bun, and Node sync to each other. Same wire protocol. Mix and match freely.</p>
+      <p>Go, Bun, Node, and any language with SQLite + HTTP. Same wire protocol. Mix and match freely.</p>
     </div>
 
     <div class="feature">
@@ -893,7 +893,7 @@ a { color: inherit; text-decoration: none; }
           <td><span class="no">✗</span> C only</td>
           <td><span class="no">✗</span> Go only</td>
           <td><span class="no">✗</span> Go only</td>
-          <td class="col-highlight"><span class="yes">✓</span> Go · Bun · Node</td>
+          <td class="col-highlight"><span class="yes">✓</span> Go · Bun · Node · any</td>
         </tr>
         <tr>
           <td>Split-brain safe</td>
@@ -922,11 +922,46 @@ a { color: inherit; text-decoration: none; }
 </section>
 
 <!-- ═══════════════════════════════════════════════════════════════
+     Runtimes
+     ═══════════════════════════════════════════════════════════════ -->
+<section class="section">
+  <h2 class="section-title">Pick your stack</h2>
+  <p class="section-sub">Each runtime is self-contained. All sync to each other — same wire protocol, same ACK-based reliability.</p>
+  <div class="topology-grid">
+
+    <a href="/runtimes/go/" class="topology">
+      <div class="topology-diagram">go get hook-sync/go/trigger</div>
+      <h3>Go <span class="topology-arrow">→</span></h3>
+      <p>Importable packages. Trigger + hook capture modes. Pre-built binaries. Cross-runtime.</p>
+    </a>
+
+    <a href="/runtimes/bun/" class="topology">
+      <div class="topology-diagram">bun add hooksync.js</div>
+      <h3>Bun <span class="topology-arrow">→</span></h3>
+      <p>hooksync.js + bun:sqlite. Trigger-based capture. Bun.serve() wiring.</p>
+    </a>
+
+    <a href="/runtimes/node/" class="topology">
+      <div class="topology-diagram">npm install hooksync.js</div>
+      <h3>Node.js <span class="topology-arrow">→</span></h3>
+      <p>hooksync.js + better-sqlite3. Trigger-based capture. http.createServer or Express.</p>
+    </a>
+
+    <a href="/runtimes/implement/" class="topology">
+      <div class="topology-diagram">SQLite + HTTP = sync</div>
+      <h3>Other Languages <span class="topology-arrow">→</span></h3>
+      <p>Rust, Python, PHP, or any language with SQLite + HTTP. Wire protocol is language-agnostic.</p>
+    </a>
+
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════
      Topologies
      ═══════════════════════════════════════════════════════════════ -->
 <section class="section">
   <h2 class="section-title">Four topologies</h2>
-  <p class="section-sub">From 2 nodes to multi-region. All built, verified, and benchmarked across Go, Bun, and Node.</p>
+  <p class="section-sub">From 2 nodes to multi-region. All built, verified, and benchmarked.</p>
   <div class="topology-grid">
 
     <a href="/topologies/point-to-point/" class="topology">
@@ -964,7 +999,7 @@ edge3 → hub → edge4</div>
      ═══════════════════════════════════════════════════════════════ -->
 <section class="cta-final">
   <h2>Ready to sync?</h2>
-  <p>Get up and running in 5 minutes with Go, Bun, or Node.</p>
+  <p>Get up and running in 5 minutes. Go, Bun, Node, or any language with SQLite + HTTP.</p>
   <a href="/getting-started/quick-start/" class="btn btn-primary">
     Quick Start →
   </a>

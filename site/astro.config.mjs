@@ -30,10 +30,12 @@ export default defineConfig({
 					],
 				},
 				{
-					label: 'Libraries',
+					label: 'Runtimes',
 					items: [
-						{ label: 'Go Libraries', slug: 'libraries/go' },
-						{ label: 'JS Library (hooksync.js)', slug: 'libraries/js' },
+						{ label: 'Go', slug: 'runtimes/go' },
+						{ label: 'Bun', slug: 'runtimes/bun' },
+						{ label: 'Node.js', slug: 'runtimes/node' },
+						{ label: 'Implement in Your Language', slug: 'runtimes/implement' },
 					],
 				},
 				{

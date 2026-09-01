@@ -1,0 +1,249 @@
+---
+title: Node.js
+description: SQLite replication for Node.js apps. hooksync.js library + better-sqlite3. Trigger-based capture, ACK-based sync.
+---
+
+import { Aside, Steps, Card, CardGrid } from '@astrojs/starlight/components';
+
+# Node.js
+
+hook-sync works with Node.js via the [`hooksync.js`](https://www.npmjs.com/package/hooksync.js) npm package and `better-sqlite3`. Trigger-based capture only (no preupdate_hook in `better-sqlite3`).
+
+## Quick Start
+
+<Steps>
+
+1. **Install the library**
+
+   ```bash
+   npm install hooksync.js better-sqlite3
+   ```
+
+2. **Create `server.js`**
+
+   ```js
+   const { attach } = require("hooksync.js");
+   const Database = require("better-sqlite3");
+   const http = require("http");
+
+   const db = new Database("app.db");
+   db.pragma("journal_mode = WAL");
+   db.exec(`CREATE TABLE IF NOT EXISTS items(
+    id TEXT PRIMARY KEY, name TEXT, value INTEGER,
+    created_at INTEGER, updated_at INTEGER
+   );`);
+
+   const mgr = attach(db, {
+     id: "node1",
+     peers: ["http://localhost:9002"],
+     batchMs: 50,
+   }, ["items"]);
+
+   const server = http.createServer(async (req, res) => {
+     if (req.method === "POST" && req.url === "/sync") {
+       const body = JSON.parse(await readBody(req));
+       const applied = mgr.applyChanges(body.changes);
+       res.writeHead(200, { "Content-Type": "application/json" });
+       res.end(JSON.stringify({ applied, ack: body.batch_id }));
+       return;
+     }
+     if (req.method === "GET" && req.url === "/health") {
+       res.writeHead(200, { "Content-Type": "application/json" });
+       res.end(JSON.stringify(mgr.health()));
+       return;
+     }
+     res.writeHead(404);
+     res.end("not found");
+   });
+
+   server.listen(9001);
+   ```
+
+3. **Run two instances**
+
+   ```bash
+   node server.js   # node1 on :9001
+   # In another terminal, change port to 9002 and peer to 9001
+   node server.js
+   ```
+
+4. **Write to node A, verify on node B**
+
+   ```bash
+   curl -X POST http://localhost:9001/api/items \
+     -H 'Content-Type: application/json' \
+     -d '{"name":"hello","value":42}'
+
+   curl http://localhost:9002/api/items
+   # [{"id":"...","name":"hello","value":42,...}]
+   ```
+
+</Steps>
+
+## API
+
+### `attach(db, config, tables) → Manager`
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `db` | `Database` | `better-sqlite3` instance. Caller opens it. |
+| `config` | `Config` | `{ id: string, peers: string[], batchMs?: number, batchSize?: number }` |
+| `tables` | `string[]` | Table names to sync. Triggers auto-generated via `PRAGMA table_info`. |
+
+Returns a `Manager`:
+
+| Method | Description |
+|--------|-------------|
+| `applyChanges(changes)` | Apply received changes (LWW conflict resolution). Returns count applied. |
+| `health()` | Returns `{ ok, node_id, item_count, pending_changes, dead_letter, peers }`. |
+| `stop()` | Stop the background ship loop. |
+
+## HTTP Server (Required)
+
+<Aside type="warning" title="The library does NOT include an HTTP server">
+You must wire your own HTTP server and route `POST /sync` to `mgr.applyChanges()`. This is intentional — you may already have an HTTP server.
+</Aside>
+
+### Using `http.createServer`
+
+```js
+const http = require("http");
+
+const server = http.createServer(async (req, res) => {
+  if (req.method === "POST" && req.url === "/sync") {
+    const body = JSON.parse(await readBody(req));
+    const applied = mgr.applyChanges(body.changes);
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ applied, ack: body.batch_id }));
+    return;
+  }
+
+  if (req.method === "GET" && req.url === "/health") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(mgr.health()));
+    return;
+  }
+
+  // ... your CRUD endpoints here
+  res.writeHead(404);
+  res.end("not found");
+});
+
+server.listen(9001);
+```
+
+### Using Express / Hono / HyperExpress
+
+```js
+app.post("/sync", async (req, res) => {
+  const applied = mgr.applyChanges(req.body.changes);
+  res.json({ applied, ack: req.body.batch_id });
+});
+
+app.get("/health", (req, res) => {
+  res.json(mgr.health());
+});
+```
+
+The pattern is always the same: parse JSON body, call `mgr.applyChanges(body.changes)`, return `{ applied, ack: body.batch_id }`.
+
+## Table Requirements
+
+Every synced table **must** have:
+
+- `id` — `TEXT PRIMARY KEY` (UUID, zero conflict)
+- `updated_at` — `INTEGER` (millisecond timestamp, for last-write-wins)
+
+```sql
+CREATE TABLE items(
+  id TEXT PRIMARY KEY,
+  name TEXT,
+  value INTEGER,
+  created_at INTEGER,
+  updated_at INTEGER
+);
+```
+
+## What Happens Automatically
+
+When you call `attach()`, the library:
+
+1. Creates `_meta`, `_changes`, `_dead_letter`, `_peer_state` tables
+2. Auto-generates INSERT/UPDATE/DELETE triggers via schema introspection
+3. Starts a background ship loop (50ms default)
+4. Handles ACK-based retry with exponential backoff
+5. Manages per-peer watermarks for multi-peer topologies
+
+## Multi-Peer (Full Mesh)
+
+```js
+const mgr = attach(db, {
+  id: "nodeA",
+  peers: [
+    "http://localhost:9002",
+    "http://localhost:9003",
+    "http://localhost:9004",
+  ],
+  batchMs: 50,
+}, ["items"]);
+```
+
+Each peer has its own watermark. Changes deleted from `_changes` only after **all** peers ACK. See [Full Mesh](/topologies/full-mesh/).
+
+## Hub Topology (8+ Nodes)
+
+For 8+ nodes, use a dedicated hub — a Go-only relay binary. From the JS library's perspective, the hub is just a peer URL:
+
+```js
+const mgr = attach(db, {
+  id: "edge1",
+  peers: ["http://localhost:9010"],  // hub URL — same as any peer
+  batchMs: 50,
+}, ["items"]);
+```
+
+See [Dedicated Hub](/topologies/hub/) for hub setup.
+
+## UUIDv7 Recommended
+
+UUIDv7 gives time-ordered IDs → sequential B-tree inserts. Node: [`uuidv7`](https://www.npmjs.com/package/uuidv7) package (1.8x faster than v4 on insert). Node 26+ will have `crypto.randomUUIDv7()` native ([PR #62553](https://github.com/nodejs/node/pull/62553)).
+
+```js
+const { uuidv7 } = require("uuidv7");
+const id = uuidv7(); // time-ordered UUID
+```
+
+## SQLite Binding Compatibility
+
+The library accepts a minimal `SqliteDatabase` interface — it never imports a binding:
+
+```ts
+interface SqliteDatabase {
+  exec(sql: string): void;
+  prepare(sql: string): SqliteStatement;
+  transaction<T>(fn: T): T;
+}
+```
+
+`better-sqlite3` satisfies this interface. Pass your existing instance — the library never opens or closes the database.
+
+## What This Library Does NOT Do
+
+- **No HTTP server** — caller wires `http.createServer()`, Express, or any framework
+- **No hook capture mode** — `better-sqlite3` has no preupdate hook API. Trigger-based only
+- **No consensus** — no Raft, no coordinator, no leader election. Just triggers + HTTP + ACK
+
+<CardGrid stagger>
+  <Card title="Point-to-Point" icon="seti:custom" href="/topologies/point-to-point/">
+    2 nodes, active-active. Simplest setup.
+  </Card>
+  <Card title="Full Mesh" icon="seti:custom" href="/topologies/full-mesh/">
+    3-7 nodes, all-to-all sync.
+  </Card>
+  <Card title="Dedicated Hub" icon="seti:custom" href="/topologies/hub/">
+    8+ nodes. Go-only relay with Pebble KV.
+  </Card>
+  <Card title="Multi-Region" icon="seti:custom" href="/topologies/multi-region/">
+    Hub-to-hub cross-region sync.
+  </Card>
+</CardGrid>

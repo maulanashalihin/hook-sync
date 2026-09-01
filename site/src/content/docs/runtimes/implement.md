@@ -1,0 +1,193 @@
+---
+title: Implement in Your Language
+description: The wire protocol is language-agnostic. Implement hook-sync in Rust, Python, PHP, or any language with SQLite + HTTP.
+---
+
+import { Aside, Card, CardGrid } from '@astrojs/starlight/components';
+
+# Implement in Your Language
+
+hook-sync's wire protocol is language-agnostic. If your language has SQLite and HTTP, you can implement hook-sync — and sync with existing Go, Bun, and Node nodes.
+
+No consensus algorithm. No Raft. No coordinator. Just triggers + HTTP + ACK.
+
+## What You Need
+
+Five things, in any language:
+
+1. **SQLite database** with `_changes`, `_meta`, `_dead_letter` tables
+2. **Triggers** on your data tables (INSERT/UPDATE/DELETE) that capture changes to `_changes`
+3. **Background ship loop** that reads `_changes`, POSTs to peer, deletes on ACK
+4. **`/sync` endpoint** that receives changes, applies with timestamp conflict check, returns ACK
+5. **`syncing` flag** to prevent infinite loop (trigger `WHEN` clause checks `_meta`)
+
+## The Protocol
+
+Read the full [Wire Protocol spec](/reference/protocol/) — it's ~300 lines. Here's the summary:
+
+### Change Format
+
+```json
+{
+  "op": "INSERT",
+  "table": "items",
+  "row": { "id": "0191a2b3-...", "name": "foo", "value": 42, "updated_at": 1700000000000 },
+  "old_id": null
+}
+```
+
+### Sync Request
+
+```
+POST /sync
+Content-Type: application/json
+X-Node-Id: node1
+
+{
+  "batch_id": 42,
+  "changes": [ ... ]
+}
+```
+
+### Sync Response
+
+```json
+{ "applied": 3, "ack": 42 }
+```
+
+### Conflict Resolution
+
+Last-write-wins by `updated_at` timestamp:
+
+```
+if existing.updated_at > incoming.updated_at:
+    skip (keep existing — it's newer)
+else:
+    INSERT OR REPLACE (apply incoming — it's newer)
+```
+
+Both nodes converge to the same state. No divergence.
+
+## Trigger SQL (Copy This)
+
+```sql
+CREATE TABLE _changes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  op TEXT, table_name TEXT, row_id TEXT, row_data TEXT
+);
+
+CREATE TABLE _meta (key TEXT PRIMARY KEY, value TEXT);
+INSERT OR IGNORE INTO _meta VALUES ('syncing', '0');
+
+CREATE TRIGGER items_ai AFTER INSERT ON items
+WHEN (SELECT value FROM _meta WHERE key = 'syncing') = 0
+BEGIN
+  INSERT INTO _changes(op, table_name, row_id, row_data)
+  VALUES('INSERT', 'items', NEW.id,
+    json_object('id', NEW.id, 'name', NEW.name, 'value', NEW.value,
+      'created_at', NEW.created_at, 'updated_at', NEW.updated_at));
+END;
+
+CREATE TRIGGER items_au AFTER UPDATE ON items
+WHEN (SELECT value FROM _meta WHERE key = 'syncing') = 0
+BEGIN
+  INSERT INTO _changes(op, table_name, row_id, row_data)
+  VALUES('UPDATE', 'items', NEW.id,
+    json_object('id', NEW.id, 'name', NEW.name, 'value', NEW.value,
+      'created_at', NEW.created_at, 'updated_at', NEW.updated_at));
+END;
+
+CREATE TRIGGER items_ad AFTER DELETE ON items
+WHEN (SELECT value FROM _meta WHERE key = 'syncing') = 0
+BEGIN
+  INSERT INTO _changes(op, table_name, row_id, row_data)
+  VALUES('DELETE', 'items', OLD.id,
+    json_object('id', OLD.id, 'name', OLD.name, 'value', OLD.value,
+      'created_at', OLD.created_at, 'updated_at', OLD.updated_at));
+END;
+```
+
+<Aside type="note" title="DELETE triggers capture the full OLD row">
+DELETE triggers must capture `updated_at` from the OLD row — this is required for DELETE vs UPDATE conflict resolution (timestamp comparison).
+</Aside>
+
+## Ship Loop (Pseudocode)
+
+```
+every batchMs (default 50ms):
+  rows = SELECT id, op, table_name, row_data FROM _changes ORDER BY id LIMIT 10000
+  if rows.empty: return
+
+  batch_id = rows.last.id
+  changes = rows.map(parse_json)
+
+  response = POST peer_url + "/sync"
+    headers: { "Content-Type": "application/json", "X-Node-Id": node_id }
+    body: { batch_id, changes }
+
+  if response.ack == batch_id:
+    DELETE FROM _changes WHERE id <= batch_id
+  // else: retry next tick (changes stay in _changes)
+```
+
+## Apply Changes (Pseudocode)
+
+```
+POST /sync handler:
+  body = parse_json(request.body)
+  UPDATE _meta SET value = '1' WHERE key = 'syncing'
+
+  for change in body.changes:
+    if change.op == "DELETE":
+      existing = SELECT updated_at FROM items WHERE id = change.old_id
+      if existing && existing.updated_at > change.row.updated_at:
+        continue  // keep newer update, skip delete
+      DELETE FROM items WHERE id = change.old_id
+
+    else:  // INSERT or UPDATE
+      existing = SELECT updated_at FROM items WHERE id = change.row.id
+      if existing && existing.updated_at > change.row.updated_at:
+        continue  // keep newer, skip incoming
+      INSERT OR REPLACE INTO items (columns...) VALUES (values...)
+
+  UPDATE _meta SET value = '0' WHERE key = 'syncing'
+  commit transaction
+
+  return { applied: body.changes.length, ack: body.batch_id }
+```
+
+## Table Requirements
+
+Every synced table **must** have:
+
+- `id` — `TEXT PRIMARY KEY` (UUID, zero conflict across multi-writer nodes)
+- `updated_at` — `INTEGER` (millisecond timestamp, for last-write-wins conflict resolution)
+
+UUIDv7 recommended — time-ordered IDs give sequential B-tree inserts.
+
+## Reference Implementations
+
+| Language | File | Lines | Notes |
+|----------|------|------:|-------|
+| Go | `go/cmd/server/main.go` | ~240 | Thin wrapper over `trigger/` library |
+| Bun | `bun/server.ts` | ~120 | Thin wrapper over `js/` library |
+| Node | `node/server.js` | ~110 | Thin wrapper over `js/` library |
+
+All three sync to each other — same wire protocol, same ACK-based reliability, same split-brain safety.
+
+## Coming Soon
+
+<CardGrid stagger>
+  <Card title="Rust" icon="seti:rust">
+    Planned. `rusqlite` + `hyper` or `axum`. Trigger-based capture.
+  </Card>
+  <Card title="Python" icon="seti:python">
+    Planned. `sqlite3` stdlib + `aiohttp` or `FastAPI`. Trigger-based capture.
+  </Card>
+  <Card title="PHP" icon="seti:php">
+    Planned. `PDO_SQLITE` + native HTTP server. Trigger-based capture.
+  </Card>
+  <Card title="Wire Protocol" icon="seti:custom" href="/reference/protocol/">
+    Full protocol spec — the source of truth for any implementation.
+  </Card>
+</CardGrid>
