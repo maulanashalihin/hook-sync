@@ -107,16 +107,31 @@ code, pre, kbd, samp {
   color: var(--sl-color-text-tertiary);
 }
 
+/* Sidebar links: override Starlight's white hover/active text */
+.sidebar a,
 .sidebar-group-link {
   font-weight: 500;
-  transition: color 0.15s ease;
+  transition: color 0.15s ease, background 0.15s ease;
 }
 
+.sidebar a:hover,
+.sidebar a:focus {
+  color: var(--sl-color-text) !important;
+  background: var(--sl-color-bg-tertiary);
+  border-radius: 6px;
+}
+
+.sidebar a[aria-current='page'],
 .sidebar-group-link[aria-current='page'] {
   font-weight: 600;
-  color: var(--sl-color-accent);
-  background: color-mix(in srgb, var(--sl-color-accent) 8%, transparent);
+  color: var(--sl-color-accent) !important;
+  background: color-mix(in srgb, var(--sl-color-accent) 10%, transparent) !important;
   border-radius: 6px;
+}
+
+.sidebar a[aria-current='page']:hover,
+.sidebar a[aria-current='page']:focus {
+  color: var(--sl-color-accent) !important;
 }
 
 .sidebar-group-link[aria-current='page']::before {
@@ -290,14 +305,15 @@ starlight-menu-button button {
   color: var(--sl-color-text-secondary) !important;
 }
 
-/* Sidebar active link: softer highlight for light mode */
-.sidebar-group-link[aria-current='page'] {
-  background: color-mix(in srgb, var(--sl-color-accent) 10%, transparent);
-  color: var(--sl-color-accent);
+
+/* ── Page Title & Headings ────────────────────────────────────── */
+/* Starlight hardcodes var(--sl-color-white) for all headings */
+main h1,
+.sl-markdown-content :is(h1, h2, h3, h4, h5, h6) {
+  color: var(--sl-color-text);
 }
 
-/* ── Page Title ───────────────────────────────────────────────── */
-.content > h1 {
+main h1 {
   font-weight: 800;
   font-size: clamp(1.75rem, 4vw, 2.5rem);
   letter-spacing: -0.04em;
@@ -306,6 +322,9 @@ starlight-menu-button button {
 /* ── Page Footer (prev/next) ──────────────────────────────────── */
 .pagination-links {
   border-color: var(--sl-color-border);
+}
+.pagination-links span {
+  color: var(--sl-color-text);
 }
 
 /* ── Selection ────────────────────────────────────────────────── */
